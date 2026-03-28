@@ -8,7 +8,7 @@ embassy-futures = "0.1"
 embassy-sync = "0.8"
 embassy-time = "0.5"
 heapless = "0.9"
-embedded-resource-pool = { path = "../embedded-resource-pool" }
+embedded-buffer-pool = "0.1.0"
 defmt = "1"
 
 [dev-dependencies]

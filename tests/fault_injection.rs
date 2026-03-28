@@ -3,13 +3,9 @@
 
 use core::array;
 use crc::{CRC_32_ISO_HDLC, Crc};
-use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex,
-    channel,
-    zerocopy_channel,
-};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel, zerocopy_channel};
 use embassy_time::Duration;
-use embedded_resource_pool::{MappedResourceGuard, ResourcePool};
+use embedded_buffer_pool::{BufferPool, MappedBufferGuard};
 use heapless::Vec as HeaplessVec;
 use secure_serial::{
     Ack, CrcDevice, SecureSerialReceiver, SecureSerialSender, TransportRead, TransportWrite,
@@ -231,11 +227,7 @@ struct QueueWriteTransport {
 }
 
 impl QueueWriteTransport {
-    fn new(
-        queue: Arc<Mutex<VecDeque<u8>>>,
-        notify: Arc<Notify>,
-        rule: WriteRule,
-    ) -> Self {
+    fn new(queue: Arc<Mutex<VecDeque<u8>>>, notify: Arc<Notify>, rule: WriteRule) -> Self {
         Self {
             queue,
             notify,
@@ -299,29 +291,24 @@ async fn transfer_a_to_b(
         notify: ba_notify.clone(),
         max_per_read: cfg.ba_read_max,
     };
-    let a_write = QueueWriteTransport::new(
-        ab_queue.clone(),
-        ab_notify.clone(),
-        cfg.ab_rule.clone(),
-    );
+    let a_write =
+        QueueWriteTransport::new(ab_queue.clone(), ab_notify.clone(), cfg.ab_rule.clone());
     let b_read = QueueReadTransport {
         queue: ab_queue.clone(),
         notify: ab_notify.clone(),
         max_per_read: cfg.ab_read_max,
     };
-    let b_write = QueueWriteTransport::new(
-        ba_queue.clone(),
-        ba_notify.clone(),
-        cfg.ba_rule.clone(),
-    );
+    let b_write =
+        QueueWriteTransport::new(ba_queue.clone(), ba_notify.clone(), cfg.ba_rule.clone());
 
     // --- Side A (sender) ---
-    let a_tx_ch = Box::leak(Box::new(zerocopy_channel::Channel::<
-        CriticalSectionRawMutex,
-        HeaplessVec<u8, 160>,
-    >::new(Box::leak(Box::new(
-        array::from_fn::<_, 8, _>(|_| HeaplessVec::new()),
-    )))));
+    let a_tx_ch =
+        Box::leak(Box::new(zerocopy_channel::Channel::<
+            CriticalSectionRawMutex,
+            HeaplessVec<u8, 160>,
+        >::new(Box::leak(Box::new(
+            array::from_fn::<_, 8, _>(|_| HeaplessVec::new()),
+        )))));
     let (a_tx_ch_tx, a_tx_ch_rx) = a_tx_ch.split();
 
     let a_acks_to_send = Box::leak(Box::new(
@@ -331,11 +318,12 @@ async fn transfer_a_to_b(
         channel::Channel::<CriticalSectionRawMutex, Ack, 8>::new(),
     ));
 
-    let a_rx_buffers = Box::leak(Box::new([[0u8; 4096]; 4]));
-    let a_rx_alloc = Box::leak(Box::new(ResourcePool::new(a_rx_buffers.as_mut_slice())));
+    let a_rx_alloc = Box::leak(Box::new(
+        BufferPool::<CriticalSectionRawMutex, [u8; 4096], 4>::new([[0u8; 4096]; 4]),
+    ));
     let a_rx_queue = Box::leak(Box::new(channel::Channel::<
         CriticalSectionRawMutex,
-        MappedResourceGuard<CriticalSectionRawMutex, [u8; 4096], [u8], 4>,
+        MappedBufferGuard<CriticalSectionRawMutex, [u8]>,
         4,
     >::new()));
 
@@ -356,12 +344,13 @@ async fn transfer_a_to_b(
     ));
 
     // --- Side B (receiver only) ---
-    let b_tx_ch = Box::leak(Box::new(zerocopy_channel::Channel::<
-        CriticalSectionRawMutex,
-        HeaplessVec<u8, 160>,
-    >::new(Box::leak(Box::new(
-        array::from_fn::<_, 8, _>(|_| HeaplessVec::new()),
-    )))));
+    let b_tx_ch =
+        Box::leak(Box::new(zerocopy_channel::Channel::<
+            CriticalSectionRawMutex,
+            HeaplessVec<u8, 160>,
+        >::new(Box::leak(Box::new(
+            array::from_fn::<_, 8, _>(|_| HeaplessVec::new()),
+        )))));
     let (_b_tx_ch_tx, b_tx_ch_rx) = b_tx_ch.split();
 
     let b_acks_to_send = Box::leak(Box::new(
@@ -371,11 +360,12 @@ async fn transfer_a_to_b(
         channel::Channel::<CriticalSectionRawMutex, Ack, 8>::new(),
     ));
 
-    let b_rx_buffers = Box::leak(Box::new([[0u8; 4096]; 4]));
-    let b_rx_alloc = Box::leak(Box::new(ResourcePool::new(b_rx_buffers.as_mut_slice())));
+    let b_rx_alloc = Box::leak(Box::new(
+        BufferPool::<CriticalSectionRawMutex, [u8; 4096], 4>::new([[0u8; 4096]; 4]),
+    ));
     let b_rx_queue = Box::leak(Box::new(channel::Channel::<
         CriticalSectionRawMutex,
-        MappedResourceGuard<CriticalSectionRawMutex, [u8; 4096], [u8], 4>,
+        MappedBufferGuard<CriticalSectionRawMutex, [u8]>,
         4,
     >::new()));
     let b_rx_from_queue = b_rx_queue.receiver();
@@ -414,7 +404,10 @@ async fn transfer_a_to_b(
     tokio::time::timeout(std::time::Duration::from_secs(5), async move {
         match sender.write_packet(payload).await {
             Ok(()) => {
-                let v = delivered_rx.recv().await.expect("B should deliver one packet");
+                let v = delivered_rx
+                    .recv()
+                    .await
+                    .expect("B should deliver one packet");
                 Ok(v)
             }
             Err(()) => Err(()),
@@ -433,9 +426,7 @@ fn local_test(
         .expect("runtime")
         .block_on(async {
             let local = tokio::task::LocalSet::new();
-            local
-                .run_until(transfer_a_to_b(payload, cfg))
-                .await
+            local.run_until(transfer_a_to_b(payload, cfg)).await
         })
 }
 
@@ -550,7 +541,10 @@ fn c4_exhausted_retransmits_returns_error() {
     c.ab_rule = WriteRule::DropAllData;
     c.allowed_retransmits = 2;
     let got = local_test(p, c).expect("timeout");
-    assert!(got.is_err(), "sender should fail when all DATA frames are dropped");
+    assert!(
+        got.is_err(),
+        "sender should fail when all DATA frames are dropped"
+    );
 }
 
 // --- D: multi-chunk ---

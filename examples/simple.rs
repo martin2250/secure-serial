@@ -6,7 +6,7 @@ use embassy_sync::{
     zerocopy_channel,
 };
 use embassy_time::{Duration, Timer};
-use embedded_resource_pool::{MappedResourceGuard, ResourcePool};
+use embedded_buffer_pool::{BufferPool, MappedBufferGuard};
 use heapless::Vec;
 use secure_serial::{
     Ack, CrcDevice, SecureSerialReceiver, SecureSerialSender, TransportRead, TransportWrite,
@@ -59,11 +59,12 @@ async fn run_one_side<R: TransportRead + Send + 'static, W: TransportWrite + Sen
     let acks_received = Box::leak(Box::new(
         channel::Channel::<ThreadModeRawMutex, Ack, 8>::new(),
     ));
-    let rx_alloc_buffers = Box::leak(Box::new([[0u8; 4096]; 4]));
-    let rx_alloc = Box::leak(Box::new(ResourcePool::new(rx_alloc_buffers)));
+    let rx_alloc = Box::leak(Box::new(BufferPool::<ThreadModeRawMutex, [u8; 4096], 4>::new(
+        [[0u8; 4096]; 4],
+    )));
     let rx_queue = Box::leak(Box::new(channel::Channel::<
         ThreadModeRawMutex,
-        MappedResourceGuard<ThreadModeRawMutex, [u8; 4096], [u8], 4>,
+        MappedBufferGuard<ThreadModeRawMutex, [u8]>,
         4,
     >::new()));
 

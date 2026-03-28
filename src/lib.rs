@@ -1,9 +1,9 @@
-// #![no_std]
+#![no_std]
 #![allow(async_fn_in_trait, dead_code)]
 use embassy_futures::select::{Either, select};
 use embassy_sync::{blocking_mutex::raw::RawMutex, channel, zerocopy_channel};
 use embassy_time::{Duration, Instant, Timer};
-use embedded_resource_pool::{MappedResourceGuard, ResourceGuard, ResourcePool};
+use embedded_buffer_pool::{BufferGuard, BufferPool, MappedBufferGuard};
 use heapless::Vec;
 
 pub trait TransportRead {
@@ -26,10 +26,17 @@ const CHUNK_LEN_MAX: usize = 128;
 /// used as a packet start identifier (SEcure SErial)
 const MAGIC_0: u8 = 0x5E;
 const MAGIC_1: u8 = 0x5E;
-const MAGIC: [u8; 2] = [0x5E, 0x5E];
+const MAGIC: [u8; 2] = [MAGIC_0, MAGIC_1];
 const PACKET_DATA: u8 = 0xDA;
 const PACKET_ACK: u8 = 0xAC;
-const PACKET_LEN_MAX: usize = CHUNK_LEN_MAX + 2 + 1 + 12 + 4; // MAGIC, TYPE, PACKET INFO, CRC
+const PACKET_LEN_MAX: usize = 2 // MAGIC
+                            + 1 // len
+                            + 1 // type
+                            + 2 // packet_id
+                            + 4 // packet len
+                            + 4 // chunk offset
+                            + CHUNK_LEN_MAX // data
+                            + 4; // crc
 
 #[derive(Debug)]
 pub struct Ack {
@@ -148,7 +155,6 @@ where
                 }
             };
 
-            println!("chunk retransmits: {}", next_chunk.allowed_retransmits);
             if next_chunk.allowed_retransmits == 0 {
                 break Err(());
             }
@@ -207,8 +213,8 @@ pub struct SecureSerialReceiver<'a, M: RawMutex> {
     ack_queue: channel::Channel<M, Ack, NUM_INFLIGHT>,
 }
 
-struct RxPacket<'a, M: RawMutex, const N_BUF: usize, const N_POOL: usize> {
-    buffer: ResourceGuard<'a, 'static, M, [u8; N_BUF], N_POOL>,
+struct RxPacket<M: RawMutex + 'static, const N_BUF: usize> {
+    buffer: BufferGuard<M, [u8; N_BUF]>,
     packet_id: u16,
     packet_length: usize,
     buffer_written: [u32; 4], // support at most 128 chunks / 16k bytes
@@ -221,20 +227,15 @@ impl<'a, M: RawMutex> SecureSerialReceiver<'a, M> {
     pub async fn run_read<T: TransportRead, const N_POOL: usize, const N_BUF: usize>(
         transport: &mut T,
         crc_dev: &mut impl CrcDevice,
-        buffer_pool: &'a ResourcePool<'static, M, [u8; N_BUF], N_POOL>,
-        rx_queue: channel::Sender<
-            '_,
-            M,
-            MappedResourceGuard<'a, 'static, M, [u8; N_BUF], [u8], N_POOL>,
-            N_POOL,
-        >,
+        buffer_pool: &'static BufferPool<M, [u8; N_BUF], N_POOL>,
+        rx_queue: channel::Sender<'_, M, MappedBufferGuard<M, [u8]>, N_POOL>,
         acks_to_send: channel::Sender<'_, M, Ack, NUM_INFLIGHT>,
         acks_received: channel::Sender<'_, M, Ack, NUM_INFLIGHT>,
     ) -> Result<(), T::Error> {
         let mut chunk_buffer = [0; 3 * 128]; // TODO: find proper size
         let mut chunk_buffer_count = 0;
         // the packet that we're currently receiving
-        let mut rx_packet: Option<RxPacket<'_, M, N_BUF, N_POOL>> = None;
+        let mut rx_packet: Option<RxPacket<M, N_BUF>> = None;
         // TODO: send ack also when packet was already fully received and processed
         let mut last_successfully_received_packet: Option<u16> = None;
         'outer: loop {
@@ -249,14 +250,12 @@ impl<'a, M: RawMutex> SecureSerialReceiver<'a, M> {
                 let data_valid = &chunk_buffer[buffer_start..chunk_buffer_count];
                 let Some(index_start) = data_valid.iter().position(|&v| v == MAGIC_0) else {
                     // no chunk start found -> discard all data
-                    println!("no chunk start found -> discard all data {data_valid:02x?}");
                     chunk_buffer_count = 0;
                     continue 'outer;
                 };
 
                 // discard all data before the MAGIC marker
                 buffer_start += index_start;
-                println!("index start: {index_start} buffer_start: {buffer_start}");
                 let data_valid = &chunk_buffer[buffer_start..chunk_buffer_count];
                 debug_assert!(data_valid[0] == MAGIC_0);
 
@@ -264,7 +263,6 @@ impl<'a, M: RawMutex> SecureSerialReceiver<'a, M> {
                 // MAGIC (2) + length (1) + type (1) + crc (4)
                 if data_valid.len() < (2 + 1 + 1 + 4) {
                     // chunk incomplete
-                    println!("chunk incomplete");
                     break;
                 }
 
@@ -272,7 +270,6 @@ impl<'a, M: RawMutex> SecureSerialReceiver<'a, M> {
                 if data_valid[1] != MAGIC_1 {
                     // this is not a chunk start, continue search
                     buffer_start += 1;
-                    println!("this is not a chunk start, continue search {data_valid:02x?}");
                     continue;
                 }
 
@@ -284,7 +281,6 @@ impl<'a, M: RawMutex> SecureSerialReceiver<'a, M> {
                     _ => {
                         // this is not a valid chunk, continue search
                         buffer_start += 1;
-                        println!("this is not a valid chunk, continue search chunk_type");
                         continue;
                     }
                 }
@@ -294,14 +290,12 @@ impl<'a, M: RawMutex> SecureSerialReceiver<'a, M> {
                 if chunk_length > PACKET_LEN_MAX {
                     // this is not a valid chunk, continue search
                     buffer_start += 1;
-                    println!("not a valid chunk, continue search chunk_length > PACKET_LEN_MAX");
                     continue;
                 }
 
                 // check if full chunk was received
                 if data_valid.len() < (chunk_length + 4) {
                     // chunk incomplete
-                    println!("chunk incomplete data_valid.len() < (chunk_length + 4)");
                     break;
                 }
 
@@ -313,7 +307,6 @@ impl<'a, M: RawMutex> SecureSerialReceiver<'a, M> {
                     // this is not a valid chunk, continue search
                     buffer_start += 1;
                     defmt::warn!("received chunk with invalid crc");
-                    println!("received chunk with invalid crc {crc_calc:#08x} {crc_read:#08x}");
                     continue;
                 }
 
@@ -335,18 +328,11 @@ impl<'a, M: RawMutex> SecureSerialReceiver<'a, M> {
                             defmt::warn!(
                                 "received a chunk belonging to a packet that exceeds N_BUF"
                             );
-                            println!("received a chunk belonging to a packet that exceeds N_BUF");
                             continue;
                         }
 
                         if (chunk_offset * CHUNK_LEN_MAX + payload.len()) > packet_length {
                             defmt::warn!("received a chunk that exceeds its packet's length");
-                            println!(
-                                "received a chunk that exceeds its packet's length chunk_offset: {} payload.len(): {} packet_length: {}",
-                                chunk_offset,
-                                payload.len(),
-                                packet_length
-                            );
                             continue;
                         }
 
@@ -354,12 +340,6 @@ impl<'a, M: RawMutex> SecureSerialReceiver<'a, M> {
                             (packet_length - chunk_offset * CHUNK_LEN_MAX).min(CHUNK_LEN_MAX);
                         if payload.len() != payload_length_expected {
                             defmt::warn!(
-                                "chunk payload length ({}) does not match chunk offset {} and packet length {}",
-                                payload.len(),
-                                chunk_offset,
-                                packet_length
-                            );
-                            println!(
                                 "chunk payload length ({}) does not match chunk offset {} and packet length {}",
                                 payload.len(),
                                 chunk_offset,
@@ -439,9 +419,7 @@ impl<'a, M: RawMutex> SecureSerialReceiver<'a, M> {
                             let length = rxp.packet_length;
                             let rx_packet = rx_packet.take().unwrap();
                             rx_queue
-                                .send(ResourceGuard::map(rx_packet.buffer, |buf| {
-                                    &mut buf[..length]
-                                }))
+                                .send(BufferGuard::map(rx_packet.buffer, |buf| &mut buf[..length]))
                                 .await;
                             last_successfully_received_packet = Some(rx_packet.packet_id);
                         }
@@ -450,7 +428,6 @@ impl<'a, M: RawMutex> SecureSerialReceiver<'a, M> {
                         let mut buf = buffer_chunk;
                         while buf.len() >= 6 {
                             let ack = Ack::from_buffer(buf[..6].try_into().unwrap());
-                            println!("received ack {:?}", ack);
                             acks_received.try_send(ack).ok();
                             buf = &buf[6..];
                         }
@@ -485,7 +462,6 @@ impl<'a, M: RawMutex> SecureSerialReceiver<'a, M> {
             let mut rx_done = false;
             let tx_buffer = match select(ack_queue.receive(), tx_queue.receive()).await {
                 Either::First(ack) => {
-                    println!("run_write sending acks");
                     ack_buf.clear();
                     // header
                     ack_buf.extend_from_slice(&MAGIC).ok();
@@ -506,7 +482,6 @@ impl<'a, M: RawMutex> SecureSerialReceiver<'a, M> {
                     &mut ack_buf
                 }
                 Either::Second(tx_buffer) => {
-                    println!("run_write sending data");
                     rx_done = true;
                     tx_buffer
                 }
