@@ -59,9 +59,9 @@ async fn run_one_side<R: TransportRead + Send + 'static, W: TransportWrite + Sen
     let acks_received = Box::leak(Box::new(
         channel::Channel::<ThreadModeRawMutex, Ack, 8>::new(),
     ));
-    let rx_alloc = Box::leak(Box::new(BufferPool::<ThreadModeRawMutex, [u8; 4096], 4>::new(
-        [[0u8; 4096]; 4],
-    )));
+    let rx_alloc = Box::leak(Box::new(
+        BufferPool::<ThreadModeRawMutex, [u8; 4096], 4>::new([[0u8; 4096]; 4]),
+    ));
     let rx_queue = Box::leak(Box::new(channel::Channel::<
         ThreadModeRawMutex,
         MappedBufferGuard<ThreadModeRawMutex, [u8]>,
@@ -96,7 +96,6 @@ async fn run_one_side<R: TransportRead + Send + 'static, W: TransportWrite + Sen
         acks_received.receiver(),
         Duration::from_millis(1000),
         3,
-        SoftwareCrc,
     );
 
     loop {

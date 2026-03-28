@@ -63,17 +63,16 @@ impl Ack {
     }
 }
 
-pub struct SecureSerialSender<'a, M: RawMutex, C: CrcDevice> {
+pub struct SecureSerialSender<'a, M: RawMutex> {
     write_packet_id: u16,
     allowed_retransmits: usize,
 
     tx_queue: zerocopy_channel::Sender<'a, M, Vec<u8, 160>>,
     rx_confirm: channel::Receiver<'a, M, Ack, NUM_INFLIGHT>,
     retransmit_delay: Duration,
-    crc_dev: C,
 }
 
-impl<'a, M, C: CrcDevice> SecureSerialSender<'a, M, C>
+impl<'a, M> SecureSerialSender<'a, M>
 where
     M: RawMutex,
 {
@@ -82,7 +81,6 @@ where
         rx_confirm: channel::Receiver<'a, M, Ack, NUM_INFLIGHT>,
         retransmit_delay: Duration,
         allowed_retransmits: usize,
-        crc_dev: C,
     ) -> Self {
         Self {
             write_packet_id: 0,
@@ -90,7 +88,6 @@ where
             tx_queue,
             rx_confirm,
             retransmit_delay,
-            crc_dev,
         }
     }
 

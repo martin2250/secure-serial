@@ -398,7 +398,6 @@ async fn transfer_a_to_b(
         a_acks_received.receiver(),
         cfg.retransmit_delay,
         cfg.allowed_retransmits,
-        SoftwareCrc,
     );
 
     tokio::time::timeout(std::time::Duration::from_secs(5), async move {
