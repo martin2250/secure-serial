@@ -15,5 +15,6 @@ defmt = "1"
 tokio = { version = "1", features = ["full"] }
 embassy-time = { version = "0.5", features = ["std", "generic-queue-64"] }
 embassy-sync = { version = "0.8", features = ["std"] }
+critical-section = { version = "1.2", features = ["std"] }
 static_cell = "2"
 crc = "3.4"
