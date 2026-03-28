@@ -1,0 +1,19 @@
+[package]
+name = "secure-serial"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+embassy-futures = "0.1"
+embassy-sync = "0.8"
+embassy-time = "0.5"
+heapless = "0.9"
+embedded-resource-pool = { path = "../embedded-resource-pool" }
+defmt = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+embassy-time = { version = "0.5", features = ["std", "generic-queue-64"] }
+embassy-sync = { version = "0.8", features = ["std"] }
+static_cell = "2"
+crc = "3.4"
