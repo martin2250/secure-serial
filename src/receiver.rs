@@ -39,13 +39,18 @@ pub async fn run_read<
     acks_to_send: channel::Sender<'_, M, Ack, N_INFLIGHT>,
     acks_received: channel::Sender<'_, M, Ack, N_INFLIGHT>,
 ) -> Result<(), T::Error> {
-    let mut chunk_buffer = [0; 3 * 128]; // TODO: find proper size
+    let mut chunk_buffer = [0; 2 * CHUNK_LEN_MAX + 4];
     let mut chunk_buffer_count = 0;
     // the packet that we're currently receiving
     let mut rx_packet: Option<RxPacket<M, N_BUF>> = None;
     // TODO: send ack also when packet was already fully received and processed
     let mut last_successfully_received_packet: Option<u16> = None;
     'outer: loop {
+        // this should never happen: we must always leave room for one max-size read.
+        if chunk_buffer_count > (chunk_buffer.len() - CHUNK_LEN_MAX) {
+            defmt::error!("chunk buffer overflow - was not cleared in previous loop iteration. please report this as a bug.");
+            chunk_buffer_count = 0;
+        }
         // wait for at most PACKET_LEN_MAX, but the implementation should return after line idle detection anyways
         chunk_buffer_count += transport
             .read(&mut chunk_buffer[chunk_buffer_count..][..CHUNK_LEN_MAX])
