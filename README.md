@@ -77,4 +77,10 @@ Conceptual wiring — see examples/simple.rs for a full loopback demo.
 
 ## MSRV / edition
 
-This crate uses the **2024** edition; use a matching **stable** or **nightly** toolchain that supports it.
+This crate uses the **2024** edition (**Rust 1.85+**); use a matching **stable** or **nightly** toolchain.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this crate by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.

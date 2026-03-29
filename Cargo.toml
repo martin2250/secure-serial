@@ -2,8 +2,13 @@
 name = "secure-serial"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Reliable CRC-framed serial protocol with chunked packets and ACKs for no_std + Embassy"
 readme = "README.md"
+license = "MIT OR Apache-2.0"
+documentation = "https://docs.rs/secure-serial"
+keywords = ["serial", "uart", "embassy", "embedded", "no-std"]
+categories = ["embedded", "no-std"]
 
 [dependencies]
 embassy-futures = "0.1"
