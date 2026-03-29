@@ -2,6 +2,8 @@
 name = "secure-serial"
 version = "0.1.0"
 edition = "2024"
+description = "Reliable CRC-framed serial protocol with chunked packets and ACKs for no_std + Embassy"
+readme = "README.md"
 
 [dependencies]
 embassy-futures = "0.1"

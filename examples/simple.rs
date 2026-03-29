@@ -1,15 +1,12 @@
 use crc::{CRC_32_ISO_HDLC, Crc};
 use embassy_sync::{
     blocking_mutex::raw::{RawMutex, ThreadModeRawMutex},
-    channel,
     pipe::{Pipe, Reader, Writer},
 };
 use embassy_time::{Duration, Timer};
-use embedded_buffer_pool::{BufferGuard, BufferPool, MappedBufferGuard, array_new};
-use heapless::Vec;
 use secure_serial::{
-    Ack, CHUNK_LEN_MAX, CrcDevice, SecureSerialSender, TransportRead, TransportWrite, run_read,
-    run_write,
+    CrcDevice, SecureSerialResources, SecureSerialResourcesDefault, SecureSerialSender,
+    TransportRead, TransportWrite, run_read, run_write,
 };
 use static_cell::ConstStaticCell;
 
@@ -45,61 +42,38 @@ async fn run_one_side<R: TransportRead + Send + 'static, W: TransportWrite + Sen
     R::Error: Send,
     W::Error: Send,
 {
-    let tx_alloc = Box::leak(Box::new(BufferPool::<
-        ThreadModeRawMutex,
-        Vec<u8, CHUNK_LEN_MAX>,
-        8,
-    >::new(array_new!(Vec::new(), 8))));
-    let tx_ch = Box::leak(Box::new(channel::Channel::<
-        ThreadModeRawMutex,
-        BufferGuard<ThreadModeRawMutex, Vec<u8, CHUNK_LEN_MAX>>,
-        8,
-    >::new()));
-    let tx_ch_tx = tx_ch.sender();
-    let tx_ch_rx = tx_ch.receiver();
-
-    let acks_to_send = Box::leak(Box::new(
-        channel::Channel::<ThreadModeRawMutex, Ack, 8>::new(),
-    ));
-    let acks_received = Box::leak(Box::new(
-        channel::Channel::<ThreadModeRawMutex, Ack, 8>::new(),
-    ));
-    let rx_alloc = Box::leak(Box::new(
-        BufferPool::<ThreadModeRawMutex, [u8; 4096], 4>::new([[0u8; 4096]; 4]),
-    ));
-    let rx_queue = Box::leak(Box::new(channel::Channel::<
-        ThreadModeRawMutex,
-        MappedBufferGuard<ThreadModeRawMutex, [u8]>,
-        4,
-    >::new()));
+    let res: &'static SecureSerialResources<ThreadModeRawMutex, 8, 4, 4096> = &*Box::leak(
+        Box::new(SecureSerialResourcesDefault::<ThreadModeRawMutex>::new()),
+    );
 
     tokio::task::spawn_local(run_write(
         Box::leak(Box::new(write)),
-        Box::leak(Box::new(tx_ch_rx)),
-        Box::leak(Box::new(acks_to_send.receiver())),
+        Box::leak(Box::new(res.tx_chunks_receiver())),
+        Box::leak(Box::new(res.acks_to_wire_receiver())),
         Box::leak(Box::new(SoftwareCrc)),
     ));
 
     tokio::task::spawn_local(run_read(
         Box::leak(Box::new(read)),
         Box::leak(Box::new(SoftwareCrc)),
-        rx_alloc,
-        rx_queue.sender(),
-        acks_to_send.sender(),
-        acks_received.sender(),
+        res.rx_pool(),
+        res.rx_complete_sender(),
+        res.acks_to_wire_sender(),
+        res.acks_from_peer_sender(),
     ));
 
-    tokio::task::spawn_local(async {
+    tokio::task::spawn_local(async move {
+        let rx = res.rx_complete_receiver();
         loop {
-            let buf = rx_queue.receive().await;
+            let buf = rx.receive().await;
             println!("received buffer {:?}", &*buf);
         }
     });
 
     let mut sender = SecureSerialSender::new(
-        tx_alloc,
-        tx_ch_tx,
-        acks_received.receiver(),
+        res.tx_pool(),
+        res.tx_chunks_sender(),
+        res.acks_from_peer_receiver(),
         Duration::from_millis(1000),
         3,
     );

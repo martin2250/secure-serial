@@ -1,11 +1,15 @@
+//! Inbound framing and reassembly ([`run_read`]) and outbound multiplexing ([`run_write`]).
+//!
+//! These are the long-running tasks that talk to [`crate::TransportRead`] / [`crate::TransportWrite`]
+//! and the channels inside [`crate::SecureSerialResources`].
+
 use embassy_futures::select::{Either, select};
 use embassy_sync::{blocking_mutex::raw::RawMutex, channel};
 use embedded_buffer_pool::{BufferGuard, BufferPool, MappedBufferGuard};
 use heapless::Vec;
 
 use crate::protocol::{
-    Ack, CHUNK_LEN_MAX, CHUNK_PAYLOAD_MAX, MAGIC, MAGIC_0, MAGIC_1, NUM_INFLIGHT, PACKET_ACK,
-    PACKET_DATA,
+    Ack, CHUNK_LEN_MAX, CHUNK_PAYLOAD_MAX, MAGIC, MAGIC_0, MAGIC_1, PACKET_ACK, PACKET_DATA,
 };
 use crate::transport::{CrcDevice, TransportRead, TransportWrite};
 
@@ -17,9 +21,14 @@ struct RxPacket<M: RawMutex + 'static, const N_BUF: usize> {
     buffer_written_count: usize,
 }
 
+/// Reads bytes from `transport`, validates CRC, reassembles `DATA` packets into `rx_pool` buffers,
+/// forwards `ACK` records to `acks_received`, and sends local `ACK`s on `acks_to_send`.
+///
+/// Completed packets are sent on `rx_queue` as a mapped guard over the received length.
 pub async fn run_read<
     M: RawMutex + 'static,
     T: TransportRead,
+    const N_INFLIGHT: usize,
     const N_POOL: usize,
     const N_BUF: usize,
 >(
@@ -27,8 +36,8 @@ pub async fn run_read<
     crc_dev: &mut impl CrcDevice,
     buffer_pool: &'static BufferPool<M, [u8; N_BUF], N_POOL>,
     rx_queue: channel::Sender<'_, M, MappedBufferGuard<M, [u8]>, N_POOL>,
-    acks_to_send: channel::Sender<'_, M, Ack, NUM_INFLIGHT>,
-    acks_received: channel::Sender<'_, M, Ack, NUM_INFLIGHT>,
+    acks_to_send: channel::Sender<'_, M, Ack, N_INFLIGHT>,
+    acks_received: channel::Sender<'_, M, Ack, N_INFLIGHT>,
 ) -> Result<(), T::Error> {
     let mut chunk_buffer = [0; 3 * 128]; // TODO: find proper size
     let mut chunk_buffer_count = 0;
@@ -259,10 +268,12 @@ pub async fn run_read<
     }
 }
 
-pub async fn run_write<M: RawMutex + 'static, T: TransportWrite, const N_TX: usize>(
+/// Sends `DATA` chunks from `tx_queue` and `ACK` frames from `ack_queue` to `transport`, appending
+/// CRC after each frame body.
+pub async fn run_write<M: RawMutex + 'static, T: TransportWrite, const N_INFLIGHT: usize>(
     transport: &mut T,
-    tx_queue: &mut channel::Receiver<'_, M, BufferGuard<M, Vec<u8, CHUNK_LEN_MAX>>, N_TX>,
-    ack_queue: &mut channel::Receiver<'_, M, Ack, NUM_INFLIGHT>,
+    tx_queue: &mut channel::Receiver<'_, M, BufferGuard<M, Vec<u8, CHUNK_LEN_MAX>>, N_INFLIGHT>,
+    ack_queue: &mut channel::Receiver<'_, M, Ack, N_INFLIGHT>,
     crc_dev: &mut impl CrcDevice,
 ) -> Result<(), T::Error> {
     let mut ack_buf = Vec::<u8, CHUNK_LEN_MAX>::new();

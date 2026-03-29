@@ -1,29 +1,37 @@
+//! Application-facing [`SecureSerialSender`]: splits packets into chunks and cooperates with
+//! [`crate::run_write`] and [`crate::run_read`] via shared pools and channels.
+
 use embassy_futures::select::{Either, select};
 use embassy_sync::{blocking_mutex::raw::RawMutex, channel};
 use embassy_time::{Duration, Instant, Timer};
 use embedded_buffer_pool::{BufferGuard, BufferPool};
 use heapless::Vec;
 
-use crate::protocol::{Ack, CHUNK_LEN_MAX, CHUNK_PAYLOAD_MAX, MAGIC, NUM_INFLIGHT, PACKET_DATA};
+use crate::protocol::{Ack, CHUNK_LEN_MAX, CHUNK_PAYLOAD_MAX, MAGIC, PACKET_DATA};
 
-pub struct SecureSerialSender<'a, M: RawMutex + 'static, const N_TX: usize> {
+/// Sends logical packets over the link by chunking, queueing wire buffers, and waiting for ACKs.
+pub struct SecureSerialSender<'a, M: RawMutex + 'static, const N_INFLIGHT: usize> {
     write_packet_id: u16,
     allowed_retransmits: usize,
 
-    tx_pool: &'static BufferPool<M, Vec<u8, CHUNK_LEN_MAX>, N_TX>,
-    tx_queue: channel::Sender<'a, M, BufferGuard<M, Vec<u8, CHUNK_LEN_MAX>>, N_TX>,
-    rx_confirm: channel::Receiver<'a, M, Ack, NUM_INFLIGHT>,
+    tx_pool: &'static BufferPool<M, Vec<u8, CHUNK_LEN_MAX>, N_INFLIGHT>,
+    tx_queue: channel::Sender<'a, M, BufferGuard<M, Vec<u8, CHUNK_LEN_MAX>>, N_INFLIGHT>,
+    rx_confirm: channel::Receiver<'a, M, Ack, N_INFLIGHT>,
     retransmit_delay: Duration,
 }
 
-impl<'a, M, const N_TX: usize> SecureSerialSender<'a, M, N_TX>
+impl<'a, M, const N_INFLIGHT: usize> SecureSerialSender<'a, M, N_INFLIGHT>
 where
     M: RawMutex + 'static,
 {
+    /// Creates a sender using the shared TX pool and channels from [`crate::SecureSerialResources`].
+    ///
+    /// `retransmit_delay` spaces chunk transmissions; `allowed_retransmits` limits how often each
+    /// chunk may be sent before [`write_packet`](Self::write_packet) fails.
     pub fn new(
-        tx_pool: &'static BufferPool<M, Vec<u8, CHUNK_LEN_MAX>, N_TX>,
-        tx_queue: channel::Sender<'a, M, BufferGuard<M, Vec<u8, CHUNK_LEN_MAX>>, N_TX>,
-        rx_confirm: channel::Receiver<'a, M, Ack, NUM_INFLIGHT>,
+        tx_pool: &'static BufferPool<M, Vec<u8, CHUNK_LEN_MAX>, N_INFLIGHT>,
+        tx_queue: channel::Sender<'a, M, BufferGuard<M, Vec<u8, CHUNK_LEN_MAX>>, N_INFLIGHT>,
+        rx_confirm: channel::Receiver<'a, M, Ack, N_INFLIGHT>,
         retransmit_delay: Duration,
         allowed_retransmits: usize,
     ) -> Self {
@@ -37,6 +45,8 @@ where
         }
     }
 
+    /// Encodes `data` as one packet id, splits it into chunks, and returns when all chunks are ACKed
+    /// or retries are exhausted (`Err(())`).
     pub async fn write_packet(&mut self, data: &[u8]) -> Result<(), ()> {
         self.write_packet_id += 1;
 
@@ -49,7 +59,7 @@ where
             allowed_retransmits: usize,
         }
 
-        let mut chunks: Vec<ChunkInfo, NUM_INFLIGHT> = Vec::new();
+        let mut chunks: Vec<ChunkInfo, N_INFLIGHT> = Vec::new();
 
         loop {
             // sort buffer by next-to-send, b.cmp(a)
@@ -75,7 +85,7 @@ where
 
             // wait for next chunk transmission delay, allow possible acks to be processed
             let next_chunk_tx_time = next_chunk.last_sent_at + self.retransmit_delay;
-            let fut_tx = wait_then_tx(next_chunk_tx_time, self.tx_pool);
+            let fut_tx = wait_theN_INFLIGHT(next_chunk_tx_time, self.tx_pool);
             let fut_ack = self.rx_confirm.receive();
 
             // wait for slot in tx buffer
@@ -142,7 +152,7 @@ where
     }
 }
 
-async fn wait_then_tx<M: RawMutex + 'static, const N: usize>(
+async fn wait_theN_INFLIGHT<M: RawMutex + 'static, const N: usize>(
     at: Instant,
     tx_pool: &'static BufferPool<M, Vec<u8, CHUNK_LEN_MAX>, N>,
 ) -> BufferGuard<M, Vec<u8, CHUNK_LEN_MAX>> {
