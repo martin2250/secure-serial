@@ -3,13 +3,13 @@ use embassy_sync::{
     blocking_mutex::raw::{RawMutex, ThreadModeRawMutex},
     channel,
     pipe::{Pipe, Reader, Writer},
-    zerocopy_channel,
 };
 use embassy_time::{Duration, Timer};
-use embedded_buffer_pool::{BufferPool, MappedBufferGuard};
+use embedded_buffer_pool::{BufferGuard, BufferPool, MappedBufferGuard, array_new};
 use heapless::Vec;
 use secure_serial::{
-    Ack, CrcDevice, SecureSerialReceiver, SecureSerialSender, TransportRead, TransportWrite,
+    Ack, CHUNK_LEN_MAX, CrcDevice, SecureSerialSender, TransportRead, TransportWrite, run_read,
+    run_write,
 };
 use static_cell::ConstStaticCell;
 
@@ -45,13 +45,18 @@ async fn run_one_side<R: TransportRead + Send + 'static, W: TransportWrite + Sen
     R::Error: Send,
     W::Error: Send,
 {
-    let tx_ch = Box::leak(Box::new(zerocopy_channel::Channel::<
+    let tx_alloc = Box::leak(Box::new(BufferPool::<
         ThreadModeRawMutex,
-        Vec<u8, 160>,
-    >::new(Box::leak(Box::new(
-        core::array::from_fn::<_, 8, _>(|_| Vec::new()),
-    )))));
-    let (tx_ch_tx, tx_ch_rx) = tx_ch.split();
+        Vec<u8, CHUNK_LEN_MAX>,
+        8,
+    >::new(array_new!(Vec::new(), 8))));
+    let tx_ch = Box::leak(Box::new(channel::Channel::<
+        ThreadModeRawMutex,
+        BufferGuard<ThreadModeRawMutex, Vec<u8, CHUNK_LEN_MAX>>,
+        8,
+    >::new()));
+    let tx_ch_tx = tx_ch.sender();
+    let tx_ch_rx = tx_ch.receiver();
 
     let acks_to_send = Box::leak(Box::new(
         channel::Channel::<ThreadModeRawMutex, Ack, 8>::new(),
@@ -68,14 +73,14 @@ async fn run_one_side<R: TransportRead + Send + 'static, W: TransportWrite + Sen
         4,
     >::new()));
 
-    tokio::task::spawn_local(SecureSerialReceiver::run_write(
+    tokio::task::spawn_local(run_write(
         Box::leak(Box::new(write)),
         Box::leak(Box::new(tx_ch_rx)),
         Box::leak(Box::new(acks_to_send.receiver())),
         Box::leak(Box::new(SoftwareCrc)),
     ));
 
-    tokio::task::spawn_local(SecureSerialReceiver::run_read(
+    tokio::task::spawn_local(run_read(
         Box::leak(Box::new(read)),
         Box::leak(Box::new(SoftwareCrc)),
         rx_alloc,
@@ -92,6 +97,7 @@ async fn run_one_side<R: TransportRead + Send + 'static, W: TransportWrite + Sen
     });
 
     let mut sender = SecureSerialSender::new(
+        tx_alloc,
         tx_ch_tx,
         acks_received.receiver(),
         Duration::from_millis(1000),

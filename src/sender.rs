@@ -1,27 +1,28 @@
 use embassy_futures::select::{Either, select};
-use embassy_sync::{blocking_mutex::raw::RawMutex, channel, zerocopy_channel};
+use embassy_sync::{blocking_mutex::raw::RawMutex, channel};
 use embassy_time::{Duration, Instant, Timer};
+use embedded_buffer_pool::{BufferGuard, BufferPool};
 use heapless::Vec;
 
-use crate::protocol::{
-    Ack, CHUNK_LEN_MAX, MAGIC, NUM_INFLIGHT, PACKET_DATA,
-};
+use crate::protocol::{Ack, CHUNK_LEN_MAX, CHUNK_PAYLOAD_MAX, MAGIC, NUM_INFLIGHT, PACKET_DATA};
 
-pub struct SecureSerialSender<'a, M: RawMutex> {
+pub struct SecureSerialSender<'a, M: RawMutex + 'static, const N_TX: usize> {
     write_packet_id: u16,
     allowed_retransmits: usize,
 
-    tx_queue: zerocopy_channel::Sender<'a, M, Vec<u8, 160>>,
+    tx_pool: &'static BufferPool<M, Vec<u8, CHUNK_LEN_MAX>, N_TX>,
+    tx_queue: channel::Sender<'a, M, BufferGuard<M, Vec<u8, CHUNK_LEN_MAX>>, N_TX>,
     rx_confirm: channel::Receiver<'a, M, Ack, NUM_INFLIGHT>,
     retransmit_delay: Duration,
 }
 
-impl<'a, M> SecureSerialSender<'a, M>
+impl<'a, M, const N_TX: usize> SecureSerialSender<'a, M, N_TX>
 where
-    M: RawMutex,
+    M: RawMutex + 'static,
 {
     pub fn new(
-        tx_queue: zerocopy_channel::Sender<'a, M, Vec<u8, 160>>,
+        tx_pool: &'static BufferPool<M, Vec<u8, CHUNK_LEN_MAX>, N_TX>,
+        tx_queue: channel::Sender<'a, M, BufferGuard<M, Vec<u8, CHUNK_LEN_MAX>>, N_TX>,
         rx_confirm: channel::Receiver<'a, M, Ack, NUM_INFLIGHT>,
         retransmit_delay: Duration,
         allowed_retransmits: usize,
@@ -29,6 +30,7 @@ where
         Self {
             write_packet_id: 0,
             allowed_retransmits,
+            tx_pool,
             tx_queue,
             rx_confirm,
             retransmit_delay,
@@ -38,7 +40,7 @@ where
     pub async fn write_packet(&mut self, data: &[u8]) -> Result<(), ()> {
         self.write_packet_id += 1;
 
-        let chunks_total = (data.len() + CHUNK_LEN_MAX - 1) / CHUNK_LEN_MAX;
+        let chunks_total = (data.len() + CHUNK_PAYLOAD_MAX - 1) / CHUNK_PAYLOAD_MAX;
         let mut chunk_next_queue = 0;
 
         struct ChunkInfo {
@@ -73,11 +75,11 @@ where
 
             // wait for next chunk transmission delay, allow possible acks to be processed
             let next_chunk_tx_time = next_chunk.last_sent_at + self.retransmit_delay;
-            let fut_tx = wait_then_tx(next_chunk_tx_time, &mut self.tx_queue);
+            let fut_tx = wait_then_tx(next_chunk_tx_time, self.tx_pool);
             let fut_ack = self.rx_confirm.receive();
 
             // wait for slot in tx buffer
-            let tx_buffer = match select(fut_tx, fut_ack).await {
+            let mut tx_buffer = match select(fut_tx, fut_ack).await {
                 // tx buffer available
                 Either::First(tx_buffer) => tx_buffer,
                 // ack received -> update chunks
@@ -101,9 +103,9 @@ where
             }
 
             // encode packet
-            let offset_bytes = next_chunk.chunk_offset as usize * CHUNK_LEN_MAX;
+            let offset_bytes = next_chunk.chunk_offset as usize * CHUNK_PAYLOAD_MAX;
             let data_chunk = &data[offset_bytes..];
-            let data_chunk = &data_chunk[..data_chunk.len().min(CHUNK_LEN_MAX)];
+            let data_chunk = &data_chunk[..data_chunk.len().min(CHUNK_PAYLOAD_MAX)];
 
             tx_buffer.clear();
             tx_buffer.extend_from_slice(&MAGIC).ok();
@@ -135,15 +137,15 @@ where
             next_chunk.last_sent_at = Instant::now();
             next_chunk.allowed_retransmits -= 1;
 
-            self.tx_queue.send_done();
+            self.tx_queue.send(tx_buffer).await;
         }
     }
 }
 
-async fn wait_then_tx<'a, 'b, M: RawMutex>(
+async fn wait_then_tx<M: RawMutex + 'static, const N: usize>(
     at: Instant,
-    tx_queue: &'b mut zerocopy_channel::Sender<'a, M, Vec<u8, 160>>,
-) -> &'b mut Vec<u8, 160> {
+    tx_pool: &'static BufferPool<M, Vec<u8, CHUNK_LEN_MAX>, N>,
+) -> BufferGuard<M, Vec<u8, CHUNK_LEN_MAX>> {
     Timer::at(at).await;
-    tx_queue.send().await
+    tx_pool.take().await
 }

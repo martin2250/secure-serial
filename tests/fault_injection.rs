@@ -1,14 +1,14 @@
 //! Integration tests: secure-serial over scripted bidirectional links with fault injection.
 //! Category: Integration (host-side fake transport, no mock frameworks).
 
-use core::array;
 use crc::{CRC_32_ISO_HDLC, Crc};
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel, zerocopy_channel};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel};
 use embassy_time::Duration;
-use embedded_buffer_pool::{BufferPool, MappedBufferGuard};
+use embedded_buffer_pool::{BufferGuard, BufferPool, MappedBufferGuard, array_new};
 use heapless::Vec as HeaplessVec;
 use secure_serial::{
-    Ack, CrcDevice, SecureSerialReceiver, SecureSerialSender, TransportRead, TransportWrite,
+    Ack, CHUNK_LEN_MAX, CrcDevice, SecureSerialSender, TransportRead, TransportWrite, run_read,
+    run_write,
 };
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -302,14 +302,18 @@ async fn transfer_a_to_b(
         QueueWriteTransport::new(ba_queue.clone(), ba_notify.clone(), cfg.ba_rule.clone());
 
     // --- Side A (sender) ---
-    let a_tx_ch =
-        Box::leak(Box::new(zerocopy_channel::Channel::<
-            CriticalSectionRawMutex,
-            HeaplessVec<u8, 160>,
-        >::new(Box::leak(Box::new(
-            array::from_fn::<_, 8, _>(|_| HeaplessVec::new()),
-        )))));
-    let (a_tx_ch_tx, a_tx_ch_rx) = a_tx_ch.split();
+    let a_tx_alloc = Box::leak(Box::new(BufferPool::<
+        CriticalSectionRawMutex,
+        HeaplessVec<u8, CHUNK_LEN_MAX>,
+        8,
+    >::new(array_new!(HeaplessVec::new(), 8))));
+    let a_tx_ch = Box::leak(Box::new(channel::Channel::<
+        CriticalSectionRawMutex,
+        BufferGuard<CriticalSectionRawMutex, HeaplessVec<u8, CHUNK_LEN_MAX>>,
+        8,
+    >::new()));
+    let a_tx_ch_tx = a_tx_ch.sender();
+    let a_tx_ch_rx = a_tx_ch.receiver();
 
     let a_acks_to_send = Box::leak(Box::new(
         channel::Channel::<CriticalSectionRawMutex, Ack, 8>::new(),
@@ -327,14 +331,14 @@ async fn transfer_a_to_b(
         4,
     >::new()));
 
-    tokio::task::spawn_local(SecureSerialReceiver::run_write(
+    tokio::task::spawn_local(run_write(
         Box::leak(Box::new(a_write)),
         Box::leak(Box::new(a_tx_ch_rx)),
         Box::leak(Box::new(a_acks_to_send.receiver())),
         Box::leak(Box::new(SoftwareCrc)),
     ));
 
-    tokio::task::spawn_local(SecureSerialReceiver::run_read(
+    tokio::task::spawn_local(run_read(
         Box::leak(Box::new(a_read)),
         Box::leak(Box::new(SoftwareCrc)),
         a_rx_alloc,
@@ -343,15 +347,13 @@ async fn transfer_a_to_b(
         a_acks_received.sender(),
     ));
 
-    // --- Side B (receiver only) ---
-    let b_tx_ch =
-        Box::leak(Box::new(zerocopy_channel::Channel::<
-            CriticalSectionRawMutex,
-            HeaplessVec<u8, 160>,
-        >::new(Box::leak(Box::new(
-            array::from_fn::<_, 8, _>(|_| HeaplessVec::new()),
-        )))));
-    let (_b_tx_ch_tx, b_tx_ch_rx) = b_tx_ch.split();
+    // --- Side B (receiver only; no data frames — tx channel stays idle) ---
+    let b_tx_ch = Box::leak(Box::new(channel::Channel::<
+        CriticalSectionRawMutex,
+        BufferGuard<CriticalSectionRawMutex, HeaplessVec<u8, CHUNK_LEN_MAX>>,
+        8,
+    >::new()));
+    let b_tx_ch_rx = b_tx_ch.receiver();
 
     let b_acks_to_send = Box::leak(Box::new(
         channel::Channel::<CriticalSectionRawMutex, Ack, 8>::new(),
@@ -372,14 +374,14 @@ async fn transfer_a_to_b(
 
     let (delivered_tx, mut delivered_rx) = tokio::sync::mpsc::channel::<std::vec::Vec<u8>>(2);
 
-    tokio::task::spawn_local(SecureSerialReceiver::run_write(
+    tokio::task::spawn_local(run_write(
         Box::leak(Box::new(b_write)),
         Box::leak(Box::new(b_tx_ch_rx)),
         Box::leak(Box::new(b_acks_to_send.receiver())),
         Box::leak(Box::new(SoftwareCrc)),
     ));
 
-    tokio::task::spawn_local(SecureSerialReceiver::run_read(
+    tokio::task::spawn_local(run_read(
         Box::leak(Box::new(b_read)),
         Box::leak(Box::new(SoftwareCrc)),
         b_rx_alloc,
@@ -394,6 +396,7 @@ async fn transfer_a_to_b(
     });
 
     let mut sender = SecureSerialSender::new(
+        a_tx_alloc,
         a_tx_ch_tx,
         a_acks_received.receiver(),
         cfg.retransmit_delay,
