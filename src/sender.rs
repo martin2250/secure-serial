@@ -85,7 +85,7 @@ where
 
             // wait for next chunk transmission delay, allow possible acks to be processed
             let next_chunk_tx_time = next_chunk.last_sent_at + self.retransmit_delay;
-            let fut_tx = wait_theN_INFLIGHT(next_chunk_tx_time, self.tx_pool);
+            let fut_tx = wait_then_send(next_chunk_tx_time, self.tx_pool);
             let fut_ack = self.rx_confirm.receive();
 
             // wait for slot in tx buffer
@@ -152,7 +152,7 @@ where
     }
 }
 
-async fn wait_theN_INFLIGHT<M: RawMutex + 'static, const N: usize>(
+async fn wait_then_send<M: RawMutex + 'static, const N: usize>(
     at: Instant,
     tx_pool: &'static BufferPool<M, Vec<u8, CHUNK_LEN_MAX>, N>,
 ) -> BufferGuard<M, Vec<u8, CHUNK_LEN_MAX>> {
