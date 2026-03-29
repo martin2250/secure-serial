@@ -611,3 +611,95 @@ fn a_split_mid_frame_wire() {
     let got = local_test(p, c).expect("timeout");
     assert_eq!(got.expect("send ok"), p.to_vec());
 }
+
+// --- G: malformed DATA length (CRC valid, header too short) ---
+
+/// DATA frame with `chunk_length` below the minimum for `packet_id` + `packet_len` + `chunk_offset`
+/// (12-byte CRC input). CRC is valid for those 12 bytes; without a receiver guard this used to panic.
+fn build_short_crc_valid_data_frame() -> std::vec::Vec<u8> {
+    const SW_CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+    let chunk_len: usize = 12;
+    let mut frame = vec![
+        0x5Eu8, 0x5Eu8,
+        chunk_len as u8,
+        FRAME_DATA,
+    ];
+    frame.extend_from_slice(&[0u8; 8]);
+    let cksum = SW_CRC.checksum(&frame);
+    frame.extend_from_slice(&cksum.to_le_bytes());
+    assert_eq!(frame.len(), chunk_len + 4);
+    frame
+}
+
+#[test]
+fn g1_short_data_frame_valid_crc_does_not_panic() {
+    let frame = build_short_crc_valid_data_frame();
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let ab_queue = Arc::new(Mutex::new(VecDeque::new()));
+                    let ab_notify = Arc::new(Notify::new());
+                    ab_queue.lock().await.extend(frame.iter().copied());
+
+                    let read = QueueReadTransport {
+                        queue: ab_queue.clone(),
+                        notify: ab_notify.clone(),
+                        max_per_read: None,
+                    };
+
+                    let rx_alloc = Box::leak(Box::new(
+                        BufferPool::<CriticalSectionRawMutex, [u8; 4096], 4>::new([[0u8; 4096]; 4]),
+                    ));
+                    let rx_queue = Box::leak(Box::new(channel::Channel::<
+                        CriticalSectionRawMutex,
+                        MappedBufferGuard<CriticalSectionRawMutex, [u8]>,
+                        4,
+                    >::new()));
+
+                    let acks_to_send = Box::leak(Box::new(
+                        channel::Channel::<CriticalSectionRawMutex, Ack, 8>::new(),
+                    ));
+                    let acks_received = Box::leak(Box::new(
+                        channel::Channel::<CriticalSectionRawMutex, Ack, 8>::new(),
+                    ));
+
+                    let transport = Box::leak(Box::new(read));
+                    let crc = Box::leak(Box::new(SoftwareCrc));
+
+                    let handle = tokio::task::spawn_local(async move {
+                        run_read(
+                            transport,
+                            crc,
+                            rx_alloc,
+                            rx_queue.sender(),
+                            acks_to_send.sender(),
+                            acks_received.sender(),
+                        )
+                        .await
+                    });
+
+                    tokio::select! {
+                        r = handle => {
+                            match r {
+                                Ok(Ok(())) => {
+                                    panic!("run_read returned; expected block on second read")
+                                }
+                                Ok(Err(())) => panic!("run_read transport error"),
+                                Err(e) if e.is_panic() => {
+                                    std::panic::resume_unwind(e.into_panic())
+                                }
+                                Err(e) => panic!("task join error: {e:?}"),
+                            }
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(80)) => {}
+                    }
+                })
+                .await;
+        });
+}

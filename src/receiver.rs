@@ -107,12 +107,26 @@ pub async fn run_read<
                 continue;
             }
 
+            // `buffer_chunk` is `data_valid[4..chunk_length]`; need `chunk_length >= 4` for a valid range.
+            if chunk_length < 4 {
+                defmt::warn!("chunk length too short for header fields");
+                buffer_start += chunk_length + 4;
+                continue;
+            }
+
             let buffer_chunk = &data_valid[4..chunk_length];
             // One frame is `chunk_length` bytes (CRC input) plus 4-byte CRC trailer.
             buffer_start += chunk_length + 4;
 
             match chunk_type {
                 PACKET_DATA => {
+                    // packet_id(2) + packet_len(4) + chunk_offset(4) + payload
+                    const DATA_HEADER_BODY_LEN: usize = 2 + 4 + 4;
+                    if buffer_chunk.len() < DATA_HEADER_BODY_LEN {
+                        defmt::warn!("DATA chunk length too short for fixed header");
+                        continue;
+                    }
+
                     let packet_id = u16::from_le_bytes(buffer_chunk[0..2].try_into().unwrap());
                     let packet_length =
                         u32::from_le_bytes(buffer_chunk[2..6].try_into().unwrap()) as usize;
