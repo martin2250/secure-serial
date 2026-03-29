@@ -15,23 +15,27 @@ static PIPE_A_TO_B: ConstStaticCell<Pipe<ThreadModeRawMutex, 200>> =
 static PIPE_B_TO_A: ConstStaticCell<Pipe<ThreadModeRawMutex, 200>> =
     ConstStaticCell::new(Pipe::new());
 
-#[tokio::main(flavor = "local")]
-
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let (a_to_b_rx, a_to_b_tx) = PIPE_A_TO_B.take().split();
-    let (b_to_a_rx, b_to_a_tx) = PIPE_B_TO_A.take().split();
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (a_to_b_rx, a_to_b_tx) = PIPE_A_TO_B.take().split();
+            let (b_to_a_rx, b_to_a_tx) = PIPE_B_TO_A.take().split();
 
-    let a_read = PipeTransportRead { inner: b_to_a_rx };
-    let a_write = PipeTransportWrite { inner: a_to_b_tx };
-    let b_read = PipeTransportRead { inner: a_to_b_rx };
-    let b_write = PipeTransportWrite { inner: b_to_a_tx };
+            let a_read = PipeTransportRead { inner: b_to_a_rx };
+            let a_write = PipeTransportWrite { inner: a_to_b_tx };
+            let b_read = PipeTransportRead { inner: a_to_b_rx };
+            let b_write = PipeTransportWrite { inner: b_to_a_tx };
 
-    tokio::task::spawn_local(run_one_side(a_read, a_write, true));
-    tokio::task::spawn_local(run_one_side(b_read, b_write, false));
+            tokio::task::spawn_local(run_one_side(a_read, a_write, true));
+            tokio::task::spawn_local(run_one_side(b_read, b_write, false));
 
-    loop {
-        Timer::after_secs(1).await;
-    }
+            loop {
+                Timer::after_secs(1).await;
+            }
+        })
+        .await;
 }
 
 async fn run_one_side<R: TransportRead + Send + 'static, W: TransportWrite + Send + 'static>(

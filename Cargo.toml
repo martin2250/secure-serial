@@ -7,8 +7,13 @@ description = "Reliable CRC-framed serial protocol with chunked packets and ACKs
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 documentation = "https://docs.rs/secure-serial"
+repository = "https://github.com/martin2250/secure-serial"
 keywords = ["serial", "uart", "embassy", "embedded", "no-std"]
 categories = ["embedded", "no-std"]
+
+[features]
+default = []
+defmt = ["dep:defmt"]
 
 [dependencies]
 embassy-futures = "0.1"
@@ -16,7 +21,7 @@ embassy-sync = "0.8"
 embassy-time = "0.5"
 heapless = "0.9"
 embedded-buffer-pool = "0.2.0"
-defmt = "1"
+defmt = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

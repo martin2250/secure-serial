@@ -16,7 +16,7 @@ Reach for `secure-serial` when you have a **raw serial stream** (UART, USB-CDC, 
 - **Chunked packets**: up to **128 bytes** of payload per wire chunk (`CHUNK_PAYLOAD_MAX`); total packet size is limited by your RX reassembly buffer size
 - **Separate async tasks** for reading (`run_read`) and writing (`run_write`), plus an application-facing **`SecureSerialSender`** for outgoing packets
 - **Pluggable transport**: implement `TransportRead`, `TransportWrite`, and `CrcDevice` for your HAL or host shim
-- **Logging** via **`defmt`** in the receiver path
+- Optional **`defmt`** logging in the receiver path (enable crate feature `defmt`)
 
 ## Wire format (summary)
 
@@ -73,7 +73,9 @@ Conceptual wiring — see examples/simple.rs for a full loopback demo.
 
 ## Dependencies
 
-`embassy-futures`, `embassy-sync`, `embassy-time`, `heapless`, `embedded-buffer-pool`, `defmt`.
+`embassy-futures`, `embassy-sync`, `embassy-time`, `heapless`, `embedded-buffer-pool`.
+
+Enable the `defmt` feature if you want receiver-side diagnostics on embedded targets.
 
 ## MSRV / edition
 

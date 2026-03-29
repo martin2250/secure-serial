@@ -13,6 +13,30 @@ use crate::protocol::{
 };
 use crate::transport::{CrcDevice, TransportRead, TransportWrite};
 
+#[cfg(feature = "defmt")]
+macro_rules! log_warn {
+    ($($arg:tt)*) => {
+        defmt::warn!($($arg)*)
+    };
+}
+
+#[cfg(not(feature = "defmt"))]
+macro_rules! log_warn {
+    ($($arg:tt)*) => {};
+}
+
+#[cfg(feature = "defmt")]
+macro_rules! log_error {
+    ($($arg:tt)*) => {
+        defmt::error!($($arg)*)
+    };
+}
+
+#[cfg(not(feature = "defmt"))]
+macro_rules! log_error {
+    ($($arg:tt)*) => {};
+}
+
 struct RxPacket<M: RawMutex + 'static, const N_BUF: usize> {
     buffer: BufferGuard<M, [u8; N_BUF]>,
     packet_id: u16,
@@ -48,7 +72,9 @@ pub async fn run_read<
     'outer: loop {
         // this should never happen: we must always leave room for one max-size read.
         if chunk_buffer_count > (chunk_buffer.len() - CHUNK_LEN_MAX) {
-            defmt::error!("chunk buffer overflow - was not cleared in previous loop iteration. please report this as a bug.");
+            log_error!(
+                "chunk buffer overflow - was not cleared in previous loop iteration. please report this as a bug."
+            );
             chunk_buffer_count = 0;
         }
         // wait for at most PACKET_LEN_MAX, but the implementation should return after line idle detection anyways
@@ -117,13 +143,13 @@ pub async fn run_read<
             if crc_calc != crc_read {
                 // this is not a valid chunk, continue search
                 buffer_start += 1;
-                defmt::warn!("received chunk with invalid crc");
+                log_warn!("received chunk with invalid crc");
                 continue;
             }
 
             // `buffer_chunk` is `data_valid[4..chunk_length]`; need `chunk_length >= 4` for a valid range.
             if chunk_length < 4 {
-                defmt::warn!("chunk length too short for header fields");
+                log_warn!("chunk length too short for header fields");
                 buffer_start += chunk_length + 4;
                 continue;
             }
@@ -137,7 +163,7 @@ pub async fn run_read<
                     // packet_id(2) + packet_len(4) + chunk_offset(4) + payload
                     const DATA_HEADER_BODY_LEN: usize = 2 + 4 + 4;
                     if buffer_chunk.len() < DATA_HEADER_BODY_LEN {
-                        defmt::warn!("DATA chunk length too short for fixed header");
+                        log_warn!("DATA chunk length too short for fixed header");
                         continue;
                     }
 
@@ -150,19 +176,19 @@ pub async fn run_read<
                     let payload = &buffer_chunk[10..];
 
                     if packet_length > N_BUF {
-                        defmt::warn!("received a chunk belonging to a packet that exceeds N_BUF");
+                        log_warn!("received a chunk belonging to a packet that exceeds N_BUF");
                         continue;
                     }
 
                     if (chunk_offset * CHUNK_PAYLOAD_MAX + payload.len()) > packet_length {
-                        defmt::warn!("received a chunk that exceeds its packet's length");
+                        log_warn!("received a chunk that exceeds its packet's length");
                         continue;
                     }
 
                     let payload_length_expected =
                         (packet_length - chunk_offset * CHUNK_PAYLOAD_MAX).min(CHUNK_PAYLOAD_MAX);
                     if payload.len() != payload_length_expected {
-                        defmt::warn!(
+                        log_warn!(
                             "chunk payload length ({}) does not match chunk offset {} and packet length {}",
                             payload.len(),
                             chunk_offset,
@@ -206,7 +232,7 @@ pub async fn run_read<
 
                     // are we ready to receive?
                     let Some(rxp) = rx_packet.as_mut() else {
-                        defmt::warn!(
+                        log_warn!(
                             "could not allocate a buffer for new packet with id {} and length {}",
                             packet_id,
                             packet_length,
@@ -255,8 +281,8 @@ pub async fn run_read<
                         buf = &buf[6..];
                     }
                 }
-                t => {
-                    defmt::warn!("received unknown packet type {:#02X}", t);
+                _t => {
+                    log_warn!("received unknown packet type {:#02X}", _t);
                     continue;
                 }
             }
