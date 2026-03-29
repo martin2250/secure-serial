@@ -144,24 +144,24 @@ pub async fn run_read<
                     }
 
                     // check if this packet was received previously
-                    if let Some(packet_id_last) = last_successfully_received_packet {
-                        if packet_id_last == packet_id {
-                            // send ack again
-                            acks_to_send
-                                .try_send(Ack {
-                                    packet_id,
-                                    chunk_offset: chunk_offset as u32,
-                                })
-                                .ok();
-                            continue;
-                        }
+                    if let Some(packet_id_last) = last_successfully_received_packet
+                        && packet_id_last == packet_id
+                    {
+                        // send ack again
+                        acks_to_send
+                            .try_send(Ack {
+                                packet_id,
+                                chunk_offset: chunk_offset as u32,
+                            })
+                            .ok();
+                        continue;
                     }
 
                     // in case we're already receiving a packet, check the packet id
-                    if let Some(rxp) = rx_packet.as_ref() {
-                        if rxp.packet_id != packet_id {
-                            rx_packet = None;
-                        }
+                    if let Some(rxp) = rx_packet.as_ref()
+                        && rxp.packet_id != packet_id
+                    {
+                        rx_packet = None;
                     }
 
                     // currently not receiving a packet --> allocate a new one
@@ -169,8 +169,8 @@ pub async fn run_read<
                         // using "map" in case we can't allocate a buffer
                         rx_packet = buffer_pool.try_take().map(|buf| RxPacket {
                             buffer: buf,
-                            packet_id: packet_id,
-                            packet_length: packet_length,
+                            packet_id,
+                            packet_length,
                             buffer_written: [0; _],
                             buffer_written_count: 0,
                         })
@@ -209,8 +209,7 @@ pub async fn run_read<
                     *buffer_written |= 1 << id_bit;
 
                     // check packet received completely
-                    let num_chunks =
-                        (rxp.packet_length + (CHUNK_PAYLOAD_MAX - 1)) / CHUNK_PAYLOAD_MAX;
+                    let num_chunks = rxp.packet_length.div_ceil(CHUNK_PAYLOAD_MAX);
                     if rxp.buffer_written_count == num_chunks {
                         let length = rxp.packet_length;
                         let rx_packet = rx_packet.take().unwrap();
@@ -279,9 +278,9 @@ pub async fn run_write<M: RawMutex + 'static, T: TransportWrite, const N_TX: usi
                 transport.write(&ack_buf).await?;
             }
             Either::Second(mut tx_buffer) => {
-                let crc = crc_dev.crc(&*tx_buffer).await;
+                let crc = crc_dev.crc(&tx_buffer).await;
                 tx_buffer.extend_from_slice(&crc.to_le_bytes()).ok();
-                transport.write(&*tx_buffer).await?;
+                transport.write(&tx_buffer).await?;
             }
         }
     }

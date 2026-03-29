@@ -40,7 +40,7 @@ where
     pub async fn write_packet(&mut self, data: &[u8]) -> Result<(), ()> {
         self.write_packet_id += 1;
 
-        let chunks_total = (data.len() + CHUNK_PAYLOAD_MAX - 1) / CHUNK_PAYLOAD_MAX;
+        let chunks_total = data.len().div_ceil(CHUNK_PAYLOAD_MAX);
         let mut chunk_next_queue = 0;
 
         struct ChunkInfo {
