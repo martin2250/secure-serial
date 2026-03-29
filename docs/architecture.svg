@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 720" width="1040" height="720">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#334155"/>
+    </marker>
+    <marker id="arrow-dim" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/>
+    </marker>
+    <style type="text/css">
+      .title { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 15px; font-weight: 600; fill: #0f172a; }
+      .label { font-family: ui-monospace, "Cascadia Code", "Consolas", monospace; font-size: 11px; fill: #1e293b; }
+      .sublabel { font-family: ui-monospace, monospace; font-size: 9.5px; fill: #475569; }
+      .lane-title { font-family: system-ui, sans-serif; font-size: 12px; font-weight: 600; fill: #475569; letter-spacing: 0.04em; }
+      .box-task { fill: #eff6ff; stroke: #3b82f6; stroke-width: 1.5; }
+      .box-wire { fill: #f8fafc; stroke: #94a3b8; stroke-width: 1.5; }
+      .box-app { fill: #f0fdf4; stroke: #22c55e; stroke-width: 1.5; }
+      .box-pool { fill: #fffbeb; stroke: #eab308; stroke-width: 1.5; stroke-dasharray: 4 3; }
+      .lane-bg { fill: #f8fafc; stroke: #e2e8f0; stroke-width: 1; }
+      .line { stroke: #334155; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+      .line-dim { stroke: #64748b; stroke-width: 1.25; fill: none; marker-end: url(#arrow-dim); stroke-dasharray: 5 4; }
+    </style>
+  </defs>
+
+  <text x="120" y="28" text-anchor="middle" class="title">Transport</text>
+  <text x="380" y="28" text-anchor="middle" class="title">Async I/O tasks</text>
+  <text x="760" y="28" text-anchor="middle" class="title">Application</text>
+  <line x1="20" y1="36" x2="1020" y2="36" stroke="#e2e8f0" stroke-width="1"/>
+
+  <!-- INBOUND -->
+  <rect x="20" y="44" width="1000" height="268" rx="6" class="lane-bg"/>
+  <text x="36" y="64" class="lane-title">INBOUND (peer to host)</text>
+
+  <rect x="48" y="92" width="144" height="72" rx="6" class="box-wire"/>
+  <text x="120" y="118" text-anchor="middle" class="label">TransportRead</text>
+  <text x="120" y="136" text-anchor="middle" class="sublabel">read()</text>
+
+  <rect x="280" y="76" width="200" height="104" rx="6" class="box-task"/>
+  <text x="380" y="104" text-anchor="middle" class="label">run_read</text>
+  <text x="380" y="122" text-anchor="middle" class="sublabel">CRC, reassembly</text>
+
+  <rect x="660" y="88" width="200" height="80" rx="6" class="box-app"/>
+  <text x="760" y="118" text-anchor="middle" class="label">Packet consumer</text>
+  <text x="760" y="136" text-anchor="middle" class="sublabel">rx_complete.receive()</text>
+
+  <rect x="280" y="200" width="200" height="56" rx="6" class="box-pool"/>
+  <text x="380" y="224" text-anchor="middle" class="label">rx_pool</text>
+  <text x="380" y="242" text-anchor="middle" class="sublabel">BufferPool [u8; N_BUF]</text>
+
+  <!-- OUTBOUND (tx_pool centered above sender for straight take() line) -->
+  <rect x="20" y="328" width="1000" height="300" rx="6" class="lane-bg"/>
+  <text x="36" y="348" class="lane-title">OUTBOUND (host to peer)</text>
+
+  <rect x="48" y="508" width="144" height="72" rx="6" class="box-wire"/>
+  <text x="120" y="534" text-anchor="middle" class="label">TransportWrite</text>
+  <text x="120" y="552" text-anchor="middle" class="sublabel">write()</text>
+
+  <rect x="280" y="420" width="200" height="120" rx="6" class="box-task"/>
+  <text x="380" y="452" text-anchor="middle" class="label">run_write</text>
+  <text x="380" y="470" text-anchor="middle" class="sublabel">multiplex DATA + ACK</text>
+  <text x="380" y="492" text-anchor="middle" class="sublabel">CRC, write()</text>
+
+  <rect x="660" y="368" width="200" height="56" rx="6" class="box-pool"/>
+  <text x="760" y="392" text-anchor="middle" class="label">tx_pool</text>
+  <text x="760" y="410" text-anchor="middle" class="sublabel">BufferPool Vec (chunk)</text>
+
+  <rect x="620" y="444" width="280" height="96" rx="6" class="box-app"/>
+  <text x="760" y="476" text-anchor="middle" class="label">SecureSerialSender</text>
+  <text x="760" y="494" text-anchor="middle" class="sublabel">write_packet()</text>
+  <text x="760" y="514" text-anchor="middle" class="sublabel">take, encode, tx_queue.send</text>
+
+  <!-- One straight segment per link; anchors: wire L/R, task L/R/T/B, app L/T as appropriate -->
+  <g id="edges" fill="none">
+    <!-- TransportRead right ? run_read left -->
+    <line x1="192" y1="128" x2="280" y2="128" class="line"/>
+    <!-- rx_pool top ? run_read bottom -->
+    <line x1="380" y1="200" x2="380" y2="180" class="line"/>
+    <!-- run_read right ? Packet consumer left -->
+    <line x1="480" y1="128" x2="660" y2="128" class="line"/>
+    <!-- run_read bottom ? run_write top (acks_to_wire) -->
+    <line x1="380" y1="180" x2="380" y2="420" class="line"/>
+    <!-- run_read bottom-right ? SecureSerialSender left (acks_from_peer) -->
+    <line x1="480" y1="180" x2="620" y2="492" class="line-dim"/>
+    <!-- SecureSerialSender left ? run_write right (tx_chunks) -->
+    <line x1="620" y1="492" x2="480" y2="492" class="line"/>
+    <!-- tx_pool bottom ? SecureSerialSender top (take) -->
+    <line x1="760" y1="424" x2="760" y2="444" class="line-dim"/>
+    <!-- run_write left ? TransportWrite right (toward wire) -->
+    <line x1="280" y1="480" x2="192" y2="544" class="line"/>
+  </g>
+
+  <text x="236" y="118" text-anchor="middle" class="sublabel">read()</text>
+
+  <text x="402" y="192" class="sublabel">try_take</text>
+
+  <text x="570" y="106" text-anchor="middle" class="label">rx_complete</text>
+  <text x="570" y="120" text-anchor="middle" class="sublabel">Channel: MappedBufferGuard&lt;[u8]&gt;</text>
+  <text x="570" y="146" text-anchor="middle" class="sublabel">run_read.send / app.receive</text>
+
+  <text x="318" y="288" text-anchor="end" class="label">acks_to_wire</text>
+  <text x="318" y="302" text-anchor="end" class="sublabel">Channel: Ack</text>
+  <text x="318" y="316" text-anchor="end" class="sublabel">try_send / receive</text>
+
+  <text x="540" y="318" text-anchor="middle" class="label">acks_from_peer</text>
+  <text x="540" y="332" text-anchor="middle" class="sublabel">Channel: Ack</text>
+  <text x="540" y="346" text-anchor="middle" class="sublabel">try_send / receive</text>
+
+  <text x="550" y="478" text-anchor="middle" class="label">tx_chunks</text>
+  <text x="550" y="492" text-anchor="middle" class="sublabel">BufferGuard&lt;Vec&lt;u8, CHUNK_LEN_MAX&gt;&gt;</text>
+  <text x="550" y="506" text-anchor="middle" class="sublabel">sender.send / run_write.receive</text>
+
+  <text x="778" y="436" class="sublabel">take()</text>
+
+  <text x="230" y="518" class="sublabel">write()</text>
+
+  <rect x="20" y="648" width="1000" height="56" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="40" y="672" class="sublabel">Queues: embassy_sync::Channel (capacity N_INFLIGHT or N_RX_POOL). SecureSerialResources holds tx_chunks, acks_to_send, acks_received, rx_complete, and both pools.</text>
+  <text x="40" y="688" class="sublabel">CrcDevice is used in run_read and run_write (omitted above).</text>
+</svg>
