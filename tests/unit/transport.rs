@@ -208,6 +208,162 @@ fn noise_multiple_packets_and_all_chunk_sizes() {
     }
 }
 
+/// Reproducible end-to-end stress test of framing, corruption recovery, and chunking.
+#[test]
+fn large_noisy_stream_recovers_all_uncorrupted_packets() {
+    const BUFFER: usize = 64;
+    const PACKETS: usize = 4096;
+    const MAX_PAYLOAD: usize = BUFFER - PACKET_LEN_MIN;
+
+    // Xorshift64 keeps the test reproducible without adding a random dependency.
+    fn random(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    fn random_below(state: &mut u64, limit: usize) -> usize {
+        (random(state) % limit as u64) as usize
+    }
+
+    let mut rng = 0x4D59_5DF4_D0F3_3173;
+    // Only 57 lengths fit this buffer; cycle through all of them, including empty
+    // and maximum-size payloads, rather than requiring 4096 distinct lengths.
+    let packets: Vec<Vec<u8>> = (0..PACKETS)
+        .map(|index| {
+            (0..index % (MAX_PAYLOAD + 1))
+                .map(|_| random(&mut rng) as u8)
+                .collect()
+        })
+        .collect();
+    let mut expected = Vec::new();
+    let mut stream = Vec::new();
+    let mut tx = TransportTx::<BUFFER>::new();
+    let mut crc = SoftwareCrc;
+    let mut corruptions = [0; 8];
+
+    for (index, payload) in packets.into_iter().enumerate() {
+        tx.payload_mut()[..payload.len()].copy_from_slice(&payload);
+        let mut frame = tx.finish(payload.len(), &mut crc).unwrap().to_vec();
+        if index % 8 == 0 {
+            let corruption = (index / 8) % corruptions.len();
+            corruptions[corruption] += 1;
+            let crc_start = PACKET_HEADER_LEN + payload.len();
+            match corruption {
+                0 => frame[0] ^= 1, // Damaged preamble.
+                1 => frame[2..4].copy_from_slice(&u16::MAX.to_le_bytes()),
+                2 => {
+                    // Shorten the declared length, or use a false maximum for empty data.
+                    frame[2] = if payload.is_empty() {
+                        MAX_PAYLOAD as u8
+                    } else {
+                        (payload.len() - 1) as u8
+                    };
+                }
+                3 => frame[2] = (payload.len() + 1) as u8,
+                4 => {
+                    // Empty payloads have no data byte to flip; damage their CRC.
+                    let offset = if payload.is_empty() {
+                        crc_start
+                    } else {
+                        PACKET_HEADER_LEN + random_below(&mut rng, payload.len())
+                    };
+                    frame[offset] ^= 0x80;
+                }
+                5 => frame[crc_start + 2] ^= 1,
+                6 => {
+                    frame.remove(PACKET_HEADER_LEN); // Deleted payload/CRC byte.
+                }
+                7 => frame.insert(PACKET_HEADER_LEN, random(&mut rng) as u8),
+                _ => unreachable!(),
+            }
+        } else {
+            expected.push(payload);
+        }
+        stream.extend_from_slice(&frame);
+        let noise_len = random_below(&mut rng, 17);
+        stream.extend((0..noise_len).map(|_| random(&mut rng) as u8));
+        if index % 64 == 0 {
+            // A plausible false header forces CRC recovery across later packets.
+            stream.extend_from_slice(&[PREAMBLE[0], PREAMBLE[1], MAX_PAYLOAD as u8, 0]);
+        }
+    }
+    assert_eq!(corruptions, [64; 8]);
+    assert_eq!(expected.len(), PACKETS - 512);
+    // Complete any false candidate near EOF so it cannot hide the last packet.
+    stream.extend_from_slice(&[0; BUFFER]);
+
+    #[derive(Debug, Clone, Copy)]
+    enum ChunkSizes {
+        Fixed(usize),
+        Uniform(usize),
+        Bursty,
+    }
+    let distributions = [
+        ChunkSizes::Fixed(1),
+        ChunkSizes::Fixed(2),
+        ChunkSizes::Fixed(3),
+        ChunkSizes::Fixed(7),
+        ChunkSizes::Fixed(8),
+        ChunkSizes::Fixed(31),
+        ChunkSizes::Fixed(63),
+        ChunkSizes::Fixed(64),
+        ChunkSizes::Fixed(65),
+        ChunkSizes::Fixed(127),
+        ChunkSizes::Fixed(1024),
+        ChunkSizes::Fixed(stream.len()),
+        ChunkSizes::Uniform(4),
+        ChunkSizes::Uniform(BUFFER),
+        ChunkSizes::Uniform(256),
+        ChunkSizes::Uniform(4096),
+        ChunkSizes::Bursty,
+    ];
+    for distribution in distributions {
+        for seed in [
+            0x1234_5678_9ABC_DEF0,
+            0xCAFE_BABE_0123_4567,
+            0xF00D_9876_5432_10AB,
+        ] {
+            let mut chunk_rng = seed;
+            let mut chunks = Vec::new();
+            let mut offset = 0;
+            while offset < stream.len() {
+                let size = match distribution {
+                    ChunkSizes::Fixed(size) => size,
+                    ChunkSizes::Uniform(max) => 1 + random_below(&mut chunk_rng, max),
+                    ChunkSizes::Bursty => {
+                        if random(&mut chunk_rng) & 1 == 0 {
+                            1 + random_below(&mut chunk_rng, 4)
+                        } else {
+                            128 + random_below(&mut chunk_rng, 3969)
+                        }
+                    }
+                };
+                let end = (offset + size).min(stream.len());
+                chunks.push(&stream[offset..end]);
+                // Empty reads also occur between independently sized chunks.
+                if random(&mut chunk_rng).is_multiple_of(16) {
+                    chunks.push(&[]);
+                }
+                offset = end;
+            }
+            let received = receive::<BUFFER>(&chunks);
+            assert_eq!(
+                received.len(),
+                expected.len(),
+                "{distribution:?}, seed {seed:#x}"
+            );
+            for (index, (actual, wanted)) in received.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    actual, wanted,
+                    "{distribution:?}, seed {seed:#x}, packet {index}"
+                );
+            }
+        }
+    }
+}
+
 /// The under-eight-byte shortcut must restore the header invariant before exhaustion.
 #[test]
 fn invalid_short_header_is_not_retained() {
