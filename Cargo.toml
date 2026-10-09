@@ -3,7 +3,7 @@ name = "secure-serial"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.89"
-description = "Reliable CRC-framed serial protocol with chunked packets and ACKs for no_std + Embassy"
+description = "Allocation-free, no_std CRC framing for byte streams"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 documentation = "https://docs.rs/secure-serial"
@@ -13,11 +13,9 @@ categories = ["embedded", "no-std"]
 
 [features]
 default = []
-defmt = ["dep:defmt"]
 software-crc = ["dep:crc"]
 
 [dependencies]
-defmt = { version = "1", optional = true }
 crc = { version = "3.4", optional = true }
 
 [dev-dependencies]

@@ -399,11 +399,12 @@ fn scan<CRC: CrcDevice, const BUFFER: usize>(data: &[u8], crc: &mut CRC) -> Opti
             });
         }
         let payload_len = u16::from_le_bytes([candidate[2], candidate[3]]) as usize;
-        let total = payload_len + PACKET_LEN_MIN;
-        if total > BUFFER {
+        // Reject before adding overhead, which could overflow a 16-bit usize.
+        if payload_len > BUFFER - PACKET_LEN_MIN {
             start += 1;
             continue;
         }
+        let total = payload_len + PACKET_LEN_MIN;
         if candidate.len() < total {
             return Some(Candidate {
                 start,

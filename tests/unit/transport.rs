@@ -241,6 +241,23 @@ fn invalid_header_does_not_copy_following_payload() {
     }
 }
 
+/// Reject oversized lengths, including those whose frame size exceeds u16::MAX.
+#[test]
+fn oversized_lengths_recover_at_all_chunk_boundaries() {
+    for len in core::iter::once(9u16).chain((u16::MAX - 7)..=u16::MAX) {
+        let mut stream = PREAMBLE.to_vec();
+        stream.extend_from_slice(&len.to_le_bytes());
+        stream.extend(packet(b"OK"));
+        for split in 0..=stream.len() {
+            assert_eq!(
+                receive::<16>(&[&stream[..split], &stream[split..]]),
+                vec![b"OK".to_vec()],
+                "length {len}, split {split}"
+            );
+        }
+    }
+}
+
 /// Recover two valid inner frames from an outer candidate with a corrupt trailer.
 #[test]
 fn crc_failure_recovers_multiple_buffered_packets() {

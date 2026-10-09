@@ -6,6 +6,15 @@ A `no_std`, allocation-free transport for CRC-framed packets over a byte stream.
 from noise, invalid headers, and CRC failures. UART/USB I/O, acknowledgements,
 retransmission, and application message assembly are the caller's responsibility.
 
+CRC detects accidental corruption. It provides no authentication, encryption,
+or replay protection.
+
+**Version 1.0 scope:** The previously published
+[version 0.1.0](https://crates.io/crates/secure-serial/0.1.0) included higher-level
+packet reassembly. Version 1.0 currently contains only the transport layer and
+does not include packet reassembly. Higher-level functions are planned as a
+second layer on top of the transport.
+
 ## Quick start
 
 The default feature set is empty. Enable `software-crc` for the built-in
@@ -60,6 +69,10 @@ payload length is `min(BUFFER - 8, 65535)`. The default 512-byte buffer supports
 504-byte payloads. Incoming chunks may exceed the receiver's capacity and contain
 multiple frames.
 
+Choose `BUFFER` for small transport frames, well below `u16::MAX`, rather than
+for an entire large application message. A future higher-level reassembly layer
+is planned to assemble larger messages from multiple transport frames.
+
 ## Usage rules
 
 - Reuse one transmitter and receiver. Write every payload byte included in the
@@ -82,8 +95,7 @@ multiple frames.
   supplied slice. Reset hardware CRC peripherals on every call; recovery may
   check multiple overlapping candidates.
 
-The optional `defmt` feature enables its dependency; the receiver currently emits
-no log messages. See the [API documentation](https://docs.rs/secure-serial) for
+See the [API documentation](https://docs.rs/secure-serial) for
 method details and borrowing guarantees.
 
 ## Development
