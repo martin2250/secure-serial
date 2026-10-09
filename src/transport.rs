@@ -1,4 +1,4 @@
-//! Receive CRC-framed packets from a byte stream split into arbitrary chunks.
+//! Build CRC-framed packets in place and receive them from arbitrary stream chunks.
 //!
 //! A frame contains `55 99`, a two-byte little-endian payload length, the
 //! payload, and a four-byte little-endian CRC. The CRC covers the preamble,
@@ -32,6 +32,116 @@ const PACKET_HEADER_LEN: usize = PREAMBLE.len() + 2; // preamble (2) + len (2)
 const PACKET_CRC_LEN: usize = 4;
 /// Frame overhead, including the header and CRC but excluding the payload.
 const PACKET_LEN_MIN: usize = PACKET_HEADER_LEN + PACKET_CRC_LEN;
+
+/// An error finalizing a transmit packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxError {
+    /// The supplied payload length exceeds the buffer or wire-format limit.
+    PayloadTooLarge,
+}
+
+impl core::fmt::Display for TxError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::PayloadTooLarge => f.write_str("payload length exceeds transmit capacity"),
+        }
+    }
+}
+
+impl core::error::Error for TxError {}
+
+/// A reusable fixed-capacity packet builder with no heap allocation.
+///
+/// `BUFFER` includes the four-byte header and four-byte CRC. Write directly into
+/// [`Self::payload_mut`], then pass the number of written bytes to [`Self::finish`].
+/// Finalization adds framing in place without copying the payload.
+///
+/// Send each returned packet completely before reusing this builder. Consecutive
+/// packets need no separator and can be parsed by [`TransportRx`]. One builder
+/// holds one packet at a time; its returned slice borrows the reusable storage.
+pub struct TransportTx<const BUFFER: usize = 512> {
+    buffer: [u8; BUFFER],
+}
+
+impl<const BUFFER: usize> Default for TransportTx<BUFFER> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const BUFFER: usize> TransportTx<BUFFER> {
+    /// Creates storage for frames of up to `BUFFER` bytes, initialized once.
+    ///
+    /// A capacity of eight supports only empty payloads. The default capacity
+    /// of 512 supports payloads of up to 504 bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `BUFFER` is less than eight bytes.
+    pub fn new() -> Self {
+        assert!(
+            BUFFER >= PACKET_LEN_MIN,
+            "transport buffer must hold at least the packet header and CRC (8 bytes)"
+        );
+        Self {
+            buffer: [0; BUFFER],
+        }
+    }
+
+    /// Maximum payload length, limited by storage and the wire's `u16` length.
+    pub fn payload_capacity(&self) -> usize {
+        (BUFFER - PACKET_LEN_MIN).min(u16::MAX as usize)
+    }
+
+    /// Returns the writable payload region, reserving space for header and CRC.
+    ///
+    /// Storage is not cleared between packets and may contain earlier payload or
+    /// CRC bytes. Write every byte included in the length passed to [`Self::finish`].
+    pub fn payload_mut(&mut self) -> &mut [u8] {
+        let end = PACKET_HEADER_LEN + self.payload_capacity();
+        &mut self.buffer[PACKET_HEADER_LEN..end]
+    }
+
+    /// Writes the header and CRC in place and returns the complete packet.
+    ///
+    /// `payload_len` counts only payload bytes, all of which the caller must have
+    /// written. The CRC covers the header and that payload; its little-endian
+    /// trailer follows immediately. Empty payloads are valid.
+    ///
+    /// An oversized length returns [`TxError::PayloadTooLarge`] without changing
+    /// storage or calling the CRC device. The returned slice borrows only this
+    /// transmitter, leaving the CRC device available for further use.
+    ///
+    /// ```compile_fail
+    /// use secure_serial::{CrcDevice, TransportTx};
+    /// struct Crc;
+    /// impl CrcDevice for Crc {
+    ///     fn crc(&mut self, _: &[u8]) -> u32 { 0 }
+    /// }
+    /// let mut tx = TransportTx::<32>::new();
+    /// let packet = tx.finish(0, &mut Crc).unwrap();
+    /// tx.payload_mut()[0] = 1;
+    /// assert_eq!(packet.len(), 8); // The packet still borrows the transmitter.
+    /// ```
+    pub fn finish<'a, CRC: CrcDevice>(
+        &'a mut self,
+        payload_len: usize,
+        crc: &mut CRC,
+    ) -> Result<&'a [u8], TxError> {
+        let max = self.payload_capacity();
+        if payload_len > max {
+            return Err(TxError::PayloadTooLarge);
+        }
+        self.buffer[..PREAMBLE.len()].copy_from_slice(&PREAMBLE);
+        self.buffer[PREAMBLE.len()..PACKET_HEADER_LEN]
+            .copy_from_slice(&(payload_len as u16).to_le_bytes());
+        let crc_start = PACKET_HEADER_LEN + payload_len;
+        let checksum = crc.crc(&self.buffer[..crc_start]);
+        let packet_end = crc_start + PACKET_CRC_LEN;
+        self.buffer[crc_start..packet_end].copy_from_slice(&checksum.to_le_bytes());
+        Ok(&self.buffer[..packet_end])
+    }
+}
 
 /// A fixed-capacity receiver retaining incomplete frames between chunks.
 ///
@@ -366,6 +476,151 @@ mod tests {
             }
         }
         payloads
+    }
+
+    /// Finalization must pass exactly the header and written payload to CRC.
+    #[test]
+    fn tx_wire_bytes_and_in_place_payload() {
+        struct RecordingCrc {
+            input: Vec<u8>,
+        }
+        impl CrcDevice for RecordingCrc {
+            fn crc(&mut self, data: &[u8]) -> u32 {
+                self.input.extend_from_slice(data);
+                0x12345678
+            }
+        }
+
+        let mut tx = TransportTx::<32>::new();
+        let payload = tx.payload_mut();
+        payload[..3].copy_from_slice(&[1, 0x55, 0x99]);
+        let payload_ptr = payload.as_ptr();
+        let mut crc = RecordingCrc { input: Vec::new() };
+        let frame = tx.finish(3, &mut crc).unwrap();
+        assert_eq!(
+            frame,
+            &[0x55, 0x99, 3, 0, 1, 0x55, 0x99, 0x78, 0x56, 0x34, 0x12]
+        );
+        assert_eq!(frame[PACKET_HEADER_LEN..].as_ptr(), payload_ptr);
+        // The packet's borrow does not keep the CRC device borrowed.
+        assert_eq!(crc.input, frame[..7]);
+    }
+
+    #[test]
+    fn tx_capacity_limits_and_empty_packet() {
+        let mut tx = TransportTx::<8>::default();
+        assert_eq!(tx.payload_capacity(), 0);
+        assert!(tx.payload_mut().is_empty());
+        assert_eq!(tx.finish(0, &mut TestCrc).unwrap(), packet(&[]));
+
+        let mut default_tx = TransportTx::<512>::default();
+        assert_eq!(default_tx.payload_capacity(), 504);
+        assert_eq!(default_tx.payload_mut().len(), 504);
+
+        // Extra buffer space must not expose payload lengths beyond u16::MAX.
+        let mut tx = TransportTx::<65544>::new();
+        assert_eq!(tx.payload_capacity(), 65535);
+        let payload = tx.payload_mut();
+        assert_eq!(payload.len(), 65535);
+        payload.fill(0xA5);
+        let frame = tx.finish(65535, &mut TestCrc).unwrap();
+        assert_eq!(frame.len(), 65543);
+        assert_eq!(&frame[..4], &[0x55, 0x99, 0xFF, 0xFF]);
+        let mut rx = TransportRx::<65543>::new();
+        let mut crc = TestCrc;
+        let mut parser = rx.process(frame, &mut crc);
+        let received = parser.next().unwrap();
+        assert_eq!(received.len(), 65535);
+        assert!(received.iter().all(|&byte| byte == 0xA5));
+        assert_eq!(parser.next(), None);
+    }
+
+    /// Invalid lengths must fail before any header update or checksum access.
+    #[test]
+    fn tx_oversized_length_preserves_storage() {
+        struct UnexpectedCrc;
+        impl CrcDevice for UnexpectedCrc {
+            fn crc(&mut self, _: &[u8]) -> u32 {
+                panic!("invalid length must not invoke CRC");
+            }
+        }
+
+        let mut tx = TransportTx::<16>::new();
+        tx.payload_mut().fill(7);
+        tx.finish(8, &mut TestCrc).unwrap();
+        let before = tx.buffer;
+        for len in [9, 65536, usize::MAX] {
+            assert_eq!(
+                tx.finish(len, &mut UnexpectedCrc),
+                Err(TxError::PayloadTooLarge)
+            );
+            assert_eq!(tx.buffer, before);
+        }
+
+        let mut tx = TransportTx::<65544>::new();
+        assert_eq!(
+            tx.finish(65536, &mut UnexpectedCrc),
+            Err(TxError::PayloadTooLarge)
+        );
+    }
+
+    /// Reuse one transmitter for long, short, empty, and full-size packets.
+    #[test]
+    fn tx_reuse_chained_packets_and_all_chunk_boundaries() {
+        let expected = vec![vec![42; 16], vec![0x55, 0x99], vec![], vec![7; 24]];
+        let mut tx = TransportTx::<32>::new();
+        let mut crc = TestCrc;
+        let mut stream = Vec::new();
+        for payload in &expected {
+            tx.payload_mut()[..payload.len()].copy_from_slice(payload);
+            let frame = tx.finish(payload.len(), &mut crc).unwrap();
+            assert_eq!(frame, packet(payload));
+            // Copy only to retain a test stream; production can send each slice directly.
+            stream.extend_from_slice(frame);
+        }
+        for split in 0..=stream.len() {
+            assert_eq!(
+                receive::<32>(&[&stream[..split], &[], &stream[split..]]),
+                expected,
+                "split {split}"
+            );
+        }
+        for size in 1..=stream.len() {
+            let chunks: Vec<_> = stream.chunks(size).collect();
+            assert_eq!(receive::<32>(&chunks), expected, "chunk size {size}");
+        }
+    }
+
+    #[cfg(feature = "software-crc")]
+    #[test]
+    fn tx_software_crc_known_frame() {
+        let mut tx = TransportTx::<32>::new();
+        tx.payload_mut()[..9].copy_from_slice(b"123456789");
+        let mut crc = crate::SoftwareCrc;
+        let frame = tx.finish(9, &mut crc).unwrap();
+        // Independent bitwise CRC-32/ISO-HDLC reference over header and payload.
+        let mut reference = !0u32;
+        for &byte in &frame[..13] {
+            reference ^= u32::from(byte);
+            for _ in 0..8 {
+                reference = if reference & 1 != 0 {
+                    (reference >> 1) ^ 0xEDB8_8320
+                } else {
+                    reference >> 1
+                };
+            }
+        }
+        assert_eq!(&frame[13..], &(!reference).to_le_bytes());
+        let mut rx = TransportRx::<32>::new();
+        let mut parser = rx.process(frame, &mut crc);
+        assert_eq!(parser.next(), Some(&b"123456789"[..]));
+        assert_eq!(parser.next(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "transport buffer must hold at least")]
+    fn tx_undersized_buffer_rejected_at_construction() {
+        TransportTx::<7>::new();
     }
 
     /// Exercise preamble, length, payload, and trailer boundaries, including empty chunks.

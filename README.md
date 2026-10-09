@@ -1,8 +1,8 @@
 # secure-serial
 
-A `no_std` receiver for CRC-framed packets arriving over a byte stream in arbitrary chunks. `TransportRx` retains incomplete candidates in a fixed buffer and yields validated payload slices. It accepts noise between packets and searches again after invalid headers or CRCs.
+A `no_std` transport for CRC-framed packets over a byte stream. `TransportTx` builds packets in reusable storage without copying the payload. `TransportRx` retains incomplete candidates in a fixed buffer and yields validated payload slices from arbitrary incoming chunks. It accepts noise between packets and searches again after invalid headers or CRCs.
 
-The current public API consists of `TransportRx`, `IterRx`, and `CrcDevice`. Reading bytes from UART or USB, sending packets, acknowledgements, retransmission, and assembling application messages are responsibilities of the caller.
+The public API consists of `TransportTx`, `TxError`, `TransportRx`, `IterRx`, and `CrcDevice`. Reading and writing bytes through UART or USB, acknowledgements, retransmission, and assembling application messages are responsibilities of the caller.
 
 ## Wire format
 
@@ -15,7 +15,57 @@ The current public API consists of `TransportRx`, `IterRx`, and `CrcDevice`. Rea
 
 The CRC covers the preamble, length bytes, and payload, excluding the CRC trailer. Both peers must agree on the CRC algorithm and its parameters. The length describes only the payload, so a complete frame occupies `length + 8` bytes. Empty payloads are valid and yield `Some(&[])`.
 
-`TransportRx::<BUFFER>::new()` and `Default::default()` require `BUFFER >= 8` and panic otherwise. The capacity limits the entire frame, even when it arrives in a single chunk. Maximum accepted payload length is `min(BUFFER - 8, 65535)`; the default capacity of 512 supports 504-byte payloads. Incoming chunks can be larger than the buffer and contain many frames.
+Both `TransportTx::<BUFFER>` and `TransportRx::<BUFFER>` require `BUFFER >= 8` at construction and panic otherwise, including through `Default::default()`. The capacity limits the entire frame, even when it arrives in a single chunk. Maximum payload length is `min(BUFFER - 8, 65535)`; the default capacity of 512 supports 504-byte payloads. Incoming chunks can be larger than the receiver buffer and contain many frames.
+
+## Sending packets
+
+Create one `TransportTx` and reuse it. `payload_mut()` exposes only the payload region, reserving room for the header and CRC. Write your payload directly into this slice, then call `finish(payload_len, &mut crc)` with the number of bytes written. It adds the header and CRC in place and returns the complete packet as a read-only slice. Empty payloads are supported.
+
+This example uses a bitwise CRC-32/ISO-HDLC implementation and sends two packets directly to a receiver, without copying the payload between buffers:
+
+```rust
+use secure_serial::{CrcDevice, TransportRx, TransportTx};
+
+struct Crc32;
+
+impl CrcDevice for Crc32 {
+    fn crc(&mut self, data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+}
+
+let mut tx = TransportTx::<32>::new();
+let mut rx = TransportRx::<32>::new();
+let mut crc = Crc32;
+assert_eq!(tx.payload_capacity(), 24);
+
+for value in [1u16, 2] {
+    // Encode the application payload directly into transmit storage.
+    tx.payload_mut()[..2].copy_from_slice(&value.to_le_bytes());
+    let packet = tx.finish(2, &mut crc).unwrap();
+    // In an application, write this entire slice to UART or USB here.
+    let mut parser = rx.process(packet, &mut crc);
+    assert_eq!(parser.next(), Some(&value.to_le_bytes()[..]));
+    assert_eq!(parser.next(), None);
+}
+```
+
+`finish()` returns `TxError::PayloadTooLarge` for a length exceeding the buffer or wire-format limit. On error it leaves storage unchanged and does not invoke the CRC device. The returned packet borrows only the transmitter; the CRC device can be reused immediately.
+
+Storage is initialized once and is not cleared between packets. Write every payload byte included in the length passed to `finish()`; unused bytes are excluded from the returned packet. The CRC follows the actual payload, rather than occupying a fixed position at the end of the buffer. Finalization does not move or copy payload bytes and allocates no heap storage.
+
+Send each packet completely before reusing the transmitter, including waiting for an asynchronous write to finish. Rust prevents modifying the transmitter while its packet slice is still in use. Consecutive packets need no separator: write them one after another to form a stream that `TransportRx` can parse across any chunk boundaries. One transmitter holds one packet at a time; retaining several packets concurrently requires additional storage.
 
 ## Receiving packets
 
@@ -100,6 +150,8 @@ The default feature set is empty. `software-crc` enables the `crc` dependency an
 The transport tests cover every split position for empty and nonempty frames, the minimum buffer capacity, varying chunk sizes, noise, overlapping preambles, invalid and oversized headers, and header rejection before copying following payloads. They also cover CRC recovery of nested packets, recovered packets spanning the buffer and incoming input, and buffered recovery after dropping a parser. The helper checks the retained-buffer invariant after every exhausted chunk.
 
 A runnable documentation example verifies receiving across chunks. A compile-fail example verifies that callers cannot reuse the parser while retaining an earlier payload borrow.
+
+Transmit tests verify exact wire bytes and CRC coverage, payload storage reuse, minimum and maximum capacities, length rejection without storage changes or CRC calls, and chained Tx-to-Rx round trips across every split and chunk size. With `software-crc`, an independent bitwise reference verifies the CRC trailer. Documentation examples also verify transmitter reuse and prevent modifying a transmitter while its packet slice remains in use.
 
 ```sh
 cargo test --lib --all-features

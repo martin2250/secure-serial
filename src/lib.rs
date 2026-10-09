@@ -4,7 +4,7 @@
 
 mod transport;
 
-pub use transport::{IterRx, TransportRx};
+pub use transport::{IterRx, TransportRx, TransportTx, TxError};
 
 /// Computes the 32-bit checksum used by the sender and receiver.
 ///
