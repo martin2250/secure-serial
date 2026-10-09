@@ -78,7 +78,7 @@ impl<const BUFFER: usize> TransportTx<BUFFER> {
     /// # Panics
     ///
     /// Panics if `BUFFER` is less than eight bytes.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         assert!(
             BUFFER >= PACKET_LEN_MIN,
             "transport buffer must hold at least the packet header and CRC (8 bytes)"
@@ -89,17 +89,26 @@ impl<const BUFFER: usize> TransportTx<BUFFER> {
     }
 
     /// Maximum payload length, limited by storage and the wire's `u16` length.
-    pub fn payload_capacity(&self) -> usize {
-        (BUFFER - PACKET_LEN_MIN).min(u16::MAX as usize)
+    pub const fn payload_capacity(&self) -> usize {
+        let capacity = BUFFER - PACKET_LEN_MIN;
+        if capacity < u16::MAX as usize {
+            capacity
+        } else {
+            u16::MAX as usize
+        }
     }
 
     /// Returns the writable payload region, reserving space for header and CRC.
     ///
     /// Storage is not cleared between packets and may contain earlier payload or
     /// CRC bytes. Write every byte included in the length passed to [`Self::finish`].
-    pub fn payload_mut(&mut self) -> &mut [u8] {
-        let end = PACKET_HEADER_LEN + self.payload_capacity();
-        &mut self.buffer[PACKET_HEADER_LEN..end]
+    pub const fn payload_mut(&mut self) -> &mut [u8] {
+        let capacity = self.payload_capacity();
+        self.buffer
+            .split_at_mut(PACKET_HEADER_LEN)
+            .1
+            .split_at_mut(capacity)
+            .0
     }
 
     /// Writes the header and CRC in place and returns the complete packet.
@@ -180,7 +189,7 @@ impl<const BUFFER: usize> TransportRx<BUFFER> {
     /// # Panics
     ///
     /// Panics if `BUFFER` is less than 8 bytes.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         assert!(
             BUFFER >= PACKET_LEN_MIN,
             "transport buffer must hold at least the packet header and CRC (8 bytes)"
@@ -205,7 +214,7 @@ impl<const BUFFER: usize> TransportRx<BUFFER> {
     ///
     /// Dropping the parser early loses its remaining uncopied input. Bytes already
     /// retained by the receiver survive, including buffered recovery candidates.
-    pub fn process<'a, CRC: CrcDevice>(
+    pub const fn process<'a, CRC: CrcDevice>(
         &'a mut self,
         new_data: &'a [u8],
         crc: &'a mut CRC,
