@@ -1,88 +1,115 @@
 # secure-serial
 
-Reliable framed messaging over a byte-oriented serial link: **magic + length + type**, **CRC-32**, and **per-chunk acknowledgements** with **sender retransmission**. Built for **`#![no_std]`** firmware using **Embassy** async (`embassy-time`, `embassy-sync`, `embassy-futures`), with bounded buffers via **`heapless`** and **`embedded-buffer-pool`**.
+A `no_std` receiver for CRC-framed packets arriving over a byte stream in arbitrary chunks. `TransportRx` retains incomplete candidates in a fixed buffer and yields validated payload slices. It accepts noise between packets and searches again after invalid headers or CRCs.
 
-## When to use this crate
+The current public API consists of `TransportRx`, `IterRx`, and `CrcDevice`. Reading bytes from UART or USB, sending packets, acknowledgements, retransmission, and assembling application messages are responsibilities of the caller.
 
-Reach for `secure-serial` when you have a **raw serial stream** (UART, USB-CDC, etc.) and you need:
+## Wire format
 
-- **Detection of corrupted data** (CRC on each frame)
-- **Larger application messages** than one frame, without allocating unbounded buffers on the device
-- **Positive acknowledgement** of each chunk so the sender can **retry** after loss or noise
+| Offset | Size | Contents |
+| --- | --- | --- |
+| 0 | 2 bytes | Preamble: `0x55 0x99` |
+| 2 | 2 bytes | Payload length, unsigned little-endian `u16` |
+| 4 | Declared length | Payload |
+| 4 + length | 4 bytes | CRC, unsigned little-endian `u32` |
 
-## Features
+The CRC covers the preamble, length bytes, and payload, excluding the CRC trailer. Both peers must agree on the CRC algorithm and its parameters. The length describes only the payload, so a complete frame occupies `length + 8` bytes. Empty payloads are valid and yield `Some(&[])`.
 
-- **`no_std`**-first; integrates with **Embassy** timers and channels
-- **Chunked packets**: up to **128 bytes** of payload per wire chunk (`CHUNK_PAYLOAD_MAX`); total packet size is limited by your RX reassembly buffer size
-- **Separate async tasks** for reading (`run_read`) and writing (`run_write`), plus an application-facing **`SecureSerialSender`** for outgoing packets
-- **Pluggable transport**: implement `TransportRead`, `TransportWrite`, and `CrcDevice` for your HAL or host shim
-- Optional **`defmt`** logging in the receiver path (enable crate feature `defmt`)
+`TransportRx::<BUFFER>::new()` and `Default::default()` require `BUFFER >= 8` and panic otherwise. The capacity limits the entire frame, even when it arrives in a single chunk. Maximum accepted payload length is `min(BUFFER - 8, 65535)`; the default capacity of 512 supports 504-byte payloads. Incoming chunks can be larger than the buffer and contain many frames.
 
-## Wire format (summary)
+## Receiving packets
 
-Frames start with the magic bytes **`0x5E 0x5E`**, followed by a **length** byte, **packet type** (`DATA` or `ACK`), and type-specific payload. A **little-endian CRC-32** is appended; the CRC covers the frame bytes **up to but not including** that trailer.
+Keep one receiver across successive chunks. For each chunk, call `process()` and exhaust the returned parser with `while let Some(payload) = parser.next()`. Handle or copy each payload before requesting the next one.
 
-`DATA` chunks carry a **packet id**, **total packet length**, **chunk index**, and **payload slice**. The receiver reassembles chunks into a contiguous buffer and forwards the completed packet to your code. `ACK` frames carry one or more **`Ack`** records so the peer’s `SecureSerialSender` can advance its window.
+This example supplies a CRC-32/ISO-HDLC implementation, constructs a frame containing `OK`, and receives it across three chunks:
 
-Constants and the `Ack` helper live in the **`protocol`** module; see `CHUNK_LEN_MAX` for the maximum wire size of one chunk.
+```rust
+use secure_serial::{CrcDevice, TransportRx};
 
-## Architecture
+struct Crc32;
 
-| Piece | Responsibility |
-|-------|----------------|
-| **`SecureSerialResources`** | Fixed **TX chunk pool**, **RX reassembly pool**, and **channels** linking the I/O tasks to the app (including ACK paths). Use **`SecureSerialResourcesDefault`** for typical sizes unless you tune `N_INFLIGHT`, `N_RX_POOL`, and `N_BUF`. |
-| **`SecureSerialSender`** | **`write_packet`**: splits a slice into chunks, **waits for TX buffers**, **queues** frames for `run_write`, **consumes ACKs** from the peer, and **retransmits** according to delay and retry limits. |
-| **`run_read`** | Scans incoming bytes, validates frames, **reassembles** `DATA`, **forwards ACKs** toward the local sender, **queues completed packets** for the application. |
-| **`run_write`** | **Multiplexes** pending `DATA` chunks and outgoing `ACK`s onto the transport and appends CRC. |
+impl CrcDevice for Crc32 {
+    fn crc(&mut self, data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+}
 
-Place **`SecureSerialResources`** in a **`'static`** slot (for example **`static_cell::StaticCell`**) so pools and channel endpoints can be shared across Embassy tasks.
+let mut crc = Crc32;
+let mut frame = [0x55, 0x99, 2, 0, b'O', b'K', 0, 0, 0, 0];
+let checksum = crc.crc(&frame[..6]);
+frame[6..].copy_from_slice(&checksum.to_le_bytes());
 
-## Example (wiring)
-
-Spawn **`run_write`** and **`run_read`** with your transport and CRC implementation; connect **`SecureSerialSender::new`** to the same resource bundle’s **`tx_pool`**, **`tx_chunks_sender`**, and **`acks_from_peer_receiver`**. Receive completed packets from **`rx_complete_receiver`**.
-
-A runnable **host-side** sketch using Tokio and pipes lives in **`examples/simple.rs`** (dev-dependencies only).
-
-```text
-Conceptual wiring — see examples/simple.rs for a full loopback demo.
-
-  static RES: StaticCell<SecureSerialResourcesDefault<MyMutex>> = StaticCell::new();
-  let res: &'static _ = RES.init(SecureSerialResourcesDefault::new());
-
-  spawner.spawn(run_write(uart_tx, res.tx_chunks_receiver(), res.acks_to_wire_receiver(), crc));
-  spawner.spawn(run_read(uart_rx, crc, res.rx_pool(), res.rx_complete_sender(),
-      res.acks_to_wire_sender(), res.acks_from_peer_sender()));
-
-  let mut sender = SecureSerialSender::new(
-      res.tx_pool(),
-      res.tx_chunks_sender(),
-      res.acks_from_peer_receiver(),
-      Duration::from_millis(50),
-      3,
-  );
-  sender.write_packet(b"hello").await?;
+let mut receiver = TransportRx::<32>::new();
+let mut received = 0;
+for chunk in [&frame[..1], &frame[1..5], &frame[5..]] {
+    let mut parser = receiver.process(chunk, &mut crc);
+    while let Some(payload) = parser.next() {
+        assert_eq!(payload, b"OK");
+        received += 1;
+    }
+}
+assert_eq!(received, 1);
 ```
 
-## Crate layout
+`process()` is lazy: creating a parser does not consume or copy bytes. `next()` returns `None` when the chunk is exhausted; an incomplete candidate is retained for the next chunk. Further calls on that exhausted parser also return `None`. An empty chunk may still yield packets left in the buffer during recovery.
 
-- **`protocol`** — Magic bytes, chunk limits, **`Ack`**
-- **`transport`** — **`TransportRead`**, **`TransportWrite`**, **`CrcDevice`**
-- **`resources`** — **`SecureSerialResources`**
-- **`sender`** — **`SecureSerialSender`**
-- **`receiver`** — **`run_read`**, **`run_write`**
+Exhaust the parser before dropping it. Dropping it early loses its remaining uncopied input. Bytes already retained in the receiver survive, including recovery bytes that have not yet been yielded.
 
-## Dependencies
+## Payload borrowing
 
-`embassy-futures`, `embassy-sync`, `embassy-time`, `heapless`, `embedded-buffer-pool`.
+`IterRx` provides a lending `next(&mut self) -> Option<&[u8]>` method and does not implement `Iterator`. A payload wholly available in incoming data is returned directly from that slice. A packet spanning chunks is assembled in the receiver's buffer and returned from there. Neither path allocates heap storage.
 
-Enable the `defmt` feature if you want receiver-side diagnostics on embedded targets.
+Each payload borrows the parser. Release that borrow before calling `next()` again or dropping the parser, and drop the parser before reusing the receiver. To retain several payloads, copy them into caller-owned storage. Use a `while let` loop; iterator adapters such as `collect()` and `for` iteration are unavailable. Rust enforces this lifetime so buffer reuse cannot overwrite a payload still in use.
 
-## MSRV / edition
+## Continuation and recovery
 
-This crate uses the **2024** edition (**Rust 1.85+**); use a matching **stable** or **nightly** toolchain.
+Both incoming data and buffered bytes use the same scanner. It searches for `55`, checks `99` when available, accepts only lengths within capacity, and validates complete candidates against their CRC trailer. An invalid candidate resumes the search one byte after its start, preserving overlapping preambles.
 
-## License
+When continuing a buffered candidate:
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your option.
+1. If buffered and incoming bytes together occupy fewer than eight bytes, copy all available input and rescan before waiting. An invalid header is therefore discarded even on this short-input path.
+2. Otherwise, complete only the four-byte header first, if necessary. Validate the preamble and length before copying payload bytes. Invalid headers leave the rest of the incoming data available for searching.
+3. With a valid header, copy only enough bytes to complete its declared frame, or all available input if it is shorter. Following frames remain in the incoming slice.
+4. Validate the completed frame's CRC. On failure, rescan its copied bytes as well as the remaining input. Valid packets may be embedded within a rejected candidate or span its end and the untouched input.
 
-Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this crate by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
+After `next()` returns `None`, retained data is empty or consists of one incomplete candidate at buffer offset zero. If present, its first byte is `55`; an available second byte is `99`; a complete header declares a frame within capacity; and the retained byte count is smaller than that declared frame. Its CRC remains unverified.
+
+This is a guarantee about a candidate, not proof that it is an actual valid packet. A plausible false length can cause the parser to wait for the entire declared frame before checking its CRC. There is no timeout or automatic expiration.
+
+During recovery, copied bytes may temporarily contain several complete or partial packets. After yielding a buffered payload, the receiver tracks the unconsumed suffix by offset and defers compaction until the next call, after the payload borrow ends. The single incomplete-candidate invariant applies when the parser is exhausted, rather than after every yielded payload.
+
+## CRC devices and features
+
+Implement `CrcDevice` for a software or hardware checksum provider. Each `crc(data)` call must calculate an independent checksum over the entire supplied slice. Reset a hardware peripheral for every call. Recovery may check several overlapping candidates, so results must not depend on previous calls.
+
+The default feature set is empty. `software-crc` enables the `crc` dependency and an internal CRC-32/ISO-HDLC adapter; that adapter is currently private. `defmt` enables its dependency; the current receiver does not emit log messages. The example above works with the default features.
+
+## Verification
+
+The transport tests cover every split position for empty and nonempty frames, the minimum buffer capacity, varying chunk sizes, noise, overlapping preambles, invalid and oversized headers, and header rejection before copying following payloads. They also cover CRC recovery of nested packets, recovered packets spanning the buffer and incoming input, and buffered recovery after dropping a parser. The helper checks the retained-buffer invariant after every exhausted chunk.
+
+A runnable documentation example verifies receiving across chunks. A compile-fail example verifies that callers cannot reuse the parser while retaining an earlier payload borrow.
+
+```sh
+cargo test --lib --all-features
+cargo test --doc
+cargo clippy --lib --tests --all-features -- -D warnings
+cargo fmt --all -- --check
+```
+
+## Toolchain and license
+
+The crate uses Rust edition 2024 and declares Rust 1.85 as its minimum version.
+
+Licensed under either Apache-2.0 or MIT, at your option. Unless explicitly stated otherwise, contributions are dual licensed under these terms.
