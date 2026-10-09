@@ -18,10 +18,11 @@ pub trait CrcDevice {
     fn crc(&mut self, data: &[u8]) -> u32;
 }
 
-#[cfg(feature = "software-crc")]
-struct SoftwareCrc;
+/// Software CRC-32/ISO-HDLC implementation, available with the `software-crc` feature.
+#[cfg(any(feature = "software-crc", test))]
+pub struct SoftwareCrc;
 
-#[cfg(feature = "software-crc")]
+#[cfg(any(feature = "software-crc", test))]
 impl CrcDevice for SoftwareCrc {
     fn crc(&mut self, data: &[u8]) -> u32 {
         const CRC: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);

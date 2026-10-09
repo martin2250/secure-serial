@@ -2,7 +2,7 @@
 
 A `no_std` transport for CRC-framed packets over a byte stream. `TransportTx` builds packets in reusable storage without copying the payload. `TransportRx` retains incomplete candidates in a fixed buffer and yields validated payload slices from arbitrary incoming chunks. It accepts noise between packets and searches again after invalid headers or CRCs.
 
-The public API consists of `TransportTx`, `TxError`, `TransportRx`, `IterRx`, and `CrcDevice`. Reading and writing bytes through UART or USB, acknowledgements, retransmission, and assembling application messages are responsibilities of the caller.
+The public API consists of `TransportTx`, `TxError`, `TransportRx`, `IterRx`, and `CrcDevice`, plus `SoftwareCrc` when the `software-crc` feature is enabled. Reading and writing bytes through UART or USB, acknowledgements, retransmission, and assembling application messages are responsibilities of the caller.
 
 ## Wire format
 
@@ -21,33 +21,16 @@ Both `TransportTx::<BUFFER>` and `TransportRx::<BUFFER>` require `BUFFER >= 8` a
 
 Create one `TransportTx` and reuse it. `payload_mut()` exposes only the payload region, reserving room for the header and CRC. Write your payload directly into this slice, then call `finish(payload_len, &mut crc)` with the number of bytes written. It adds the header and CRC in place and returns the complete packet as a read-only slice. Empty payloads are supported.
 
-This example uses a bitwise CRC-32/ISO-HDLC implementation and sends two packets directly to a receiver, without copying the payload between buffers:
+Enable the `software-crc` feature as shown under [CRC devices and features](#crc-devices-and-features). This example uses `SoftwareCrc` and sends two packets directly to a receiver, without copying the payload between buffers:
 
 ```rust
-use secure_serial::{CrcDevice, TransportRx, TransportTx};
-
-struct Crc32;
-
-impl CrcDevice for Crc32 {
-    fn crc(&mut self, data: &[u8]) -> u32 {
-        let mut crc = !0u32;
-        for &byte in data {
-            crc ^= u32::from(byte);
-            for _ in 0..8 {
-                crc = if crc & 1 != 0 {
-                    (crc >> 1) ^ 0xEDB8_8320
-                } else {
-                    crc >> 1
-                };
-            }
-        }
-        !crc
-    }
-}
+# #[cfg(feature = "software-crc")]
+# {
+use secure_serial::{SoftwareCrc, TransportRx, TransportTx};
 
 let mut tx = TransportTx::<32>::new();
 let mut rx = TransportRx::<32>::new();
-let mut crc = Crc32;
+let mut crc = SoftwareCrc;
 assert_eq!(tx.payload_capacity(), 24);
 
 for value in [1u16, 2] {
@@ -59,6 +42,7 @@ for value in [1u16, 2] {
     assert_eq!(parser.next(), Some(&value.to_le_bytes()[..]));
     assert_eq!(parser.next(), None);
 }
+# }
 ```
 
 `finish()` returns `TxError::PayloadTooLarge` for a length exceeding the buffer or wire-format limit. On error it leaves storage unchanged and does not invoke the CRC device. The returned packet borrows only the transmitter; the CRC device can be reused immediately.
@@ -71,31 +55,14 @@ Send each packet completely before reusing the transmitter, including waiting fo
 
 Keep one receiver across successive chunks. For each chunk, call `process()` and exhaust the returned parser with `while let Some(payload) = parser.next()`. Handle or copy each payload before requesting the next one.
 
-This example supplies a CRC-32/ISO-HDLC implementation, constructs a frame containing `OK`, and receives it across three chunks:
+This example uses `SoftwareCrc` with the `software-crc` feature enabled, constructs a frame containing `OK`, and receives it across three chunks:
 
 ```rust
-use secure_serial::{CrcDevice, TransportRx};
+# #[cfg(feature = "software-crc")]
+# {
+use secure_serial::{CrcDevice, SoftwareCrc, TransportRx};
 
-struct Crc32;
-
-impl CrcDevice for Crc32 {
-    fn crc(&mut self, data: &[u8]) -> u32 {
-        let mut crc = !0u32;
-        for &byte in data {
-            crc ^= u32::from(byte);
-            for _ in 0..8 {
-                crc = if crc & 1 != 0 {
-                    (crc >> 1) ^ 0xEDB8_8320
-                } else {
-                    crc >> 1
-                };
-            }
-        }
-        !crc
-    }
-}
-
-let mut crc = Crc32;
+let mut crc = SoftwareCrc;
 let mut frame = [0x55, 0x99, 2, 0, b'O', b'K', 0, 0, 0, 0];
 let checksum = crc.crc(&frame[..6]);
 frame[6..].copy_from_slice(&checksum.to_le_bytes());
@@ -110,6 +77,7 @@ for chunk in [&frame[..1], &frame[1..5], &frame[5..]] {
     }
 }
 assert_eq!(received, 1);
+# }
 ```
 
 `process()` is lazy: creating a parser does not consume or copy bytes. `next()` returns `None` when the chunk is exhausted; an incomplete candidate is retained for the next chunk. Further calls on that exhausted parser also return `None`. An empty chunk may still yield packets left in the buffer during recovery.
@@ -143,19 +111,42 @@ During recovery, copied bytes may temporarily contain several complete or partia
 
 Implement `CrcDevice` for a software or hardware checksum provider. Each `crc(data)` call must calculate an independent checksum over the entire supplied slice. Reset a hardware peripheral for every call. Recovery may check several overlapping candidates, so results must not depend on previous calls.
 
-The default feature set is empty. `software-crc` enables the `crc` dependency and an internal CRC-32/ISO-HDLC adapter; that adapter is currently private. `defmt` enables its dependency; the current receiver does not emit log messages. The example above works with the default features.
+The default feature set is empty. Enable `software-crc` to use the public `SoftwareCrc` adapter, which implements `CrcDevice` using CRC-32/ISO-HDLC from the `crc` dependency:
+
+```toml
+[dependencies]
+secure-serial = { version = "1.0", features = ["software-crc"] }
+```
+
+```rust
+# #[cfg(feature = "software-crc")]
+# {
+use secure_serial::{CrcDevice, SoftwareCrc};
+
+let mut crc = SoftwareCrc;
+assert_eq!(crc.crc(b"123456789"), 0xCBF4_3926);
+# }
+```
+
+Pass `&mut crc` to `TransportTx::finish()` or `TransportRx::process()`.
+
+Run the example in `examples/simple.rs` with `cargo run --example simple --features software-crc` to send a packet and receive it across several chunks.
+
+`defmt` enables its dependency; the current receiver does not emit log messages. The sending and receiving examples above require `software-crc`; hardware CRC providers can implement `CrcDevice` with the default features.
 
 ## Verification
+
+Unit tests live in `tests/unit/transport.rs` and are included by the transport module so they can verify private buffer invariants.
 
 The transport tests cover every split position for empty and nonempty frames, the minimum buffer capacity, varying chunk sizes, noise, overlapping preambles, invalid and oversized headers, and header rejection before copying following payloads. They also cover CRC recovery of nested packets, recovered packets spanning the buffer and incoming input, and buffered recovery after dropping a parser. The helper checks the retained-buffer invariant after every exhausted chunk.
 
 A runnable documentation example verifies receiving across chunks. A compile-fail example verifies that callers cannot reuse the parser while retaining an earlier payload borrow.
 
-Transmit tests verify exact wire bytes and CRC coverage, payload storage reuse, minimum and maximum capacities, length rejection without storage changes or CRC calls, and chained Tx-to-Rx round trips across every split and chunk size. With `software-crc`, an independent bitwise reference verifies the CRC trailer. Documentation examples also verify transmitter reuse and prevent modifying a transmitter while its packet slice remains in use.
+Transmit tests verify exact wire bytes and CRC coverage, payload storage reuse, minimum and maximum capacities, length rejection without storage changes or CRC calls, and chained Tx-to-Rx round trips across every split and chunk size. All transport tests use `SoftwareCrc`, including known CRC-32/ISO-HDLC vectors to verify the CRC trailer. Test spies delegate checksum calculations to `SoftwareCrc` and record calls to verify CRC coverage and length rejection. Documentation examples also verify transmitter reuse and prevent modifying a transmitter while its packet slice remains in use.
 
 ```sh
 cargo test --lib --all-features
-cargo test --doc
+cargo test --doc --all-features
 cargo clippy --lib --tests --all-features -- -D warnings
 cargo fmt --all -- --check
 ```

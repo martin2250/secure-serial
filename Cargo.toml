@@ -22,5 +22,10 @@ defmt = { version = "1", optional = true }
 crc = { version = "3.4", optional = true }
 
 [dev-dependencies]
+crc = "3.4"
 critical-section = { version = "1.2", features = ["std"] }
 static_cell = "2"
+
+[[example]]
+name = "simple"
+required-features = ["software-crc"]
