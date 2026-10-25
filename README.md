@@ -51,6 +51,25 @@ for chunk in packet.chunks(3) {
 Run the standalone example with
 `cargo run --example simple --features software-crc`.
 
+## Embedded diagnostics
+
+Enable the optional `defmt` feature to log packet preparation and reception,
+transmit lengths exceeding capacity, rejected receive lengths, invalid preambles,
+CRC mismatches, and bytes discarded while searching for a frame. Messages use
+the debug level and include lengths and checksum values, without payload contents.
+`TxError` also implements `defmt::Format` with this feature enabled.
+
+```toml
+[dependencies]
+secure-serial = { version = "1.0", features = ["software-crc", "defmt"] }
+```
+
+The firmware must provide a defmt logger (for example, `defmt-rtt`) and its
+[linker setup](https://defmt.ferrous-systems.com/setup). Build with
+`DEFMT_LOG=secure_serial=debug` to include these messages; see defmt's
+[filtering documentation](https://defmt.ferrous-systems.com/filtering).
+Without the feature, the library has no logging dependency or logging code.
+
 ## Wire format and capacity
 
 | Size | Contents |

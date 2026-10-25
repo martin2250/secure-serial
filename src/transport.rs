@@ -35,6 +35,7 @@ const PACKET_LEN_MIN: usize = PACKET_HEADER_LEN + PACKET_CRC_LEN;
 
 /// An error finalizing a transmit packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum TxError {
     /// The supplied payload length exceeds the buffer or wire-format limit.
     PayloadTooLarge,
@@ -140,6 +141,12 @@ assert_eq!(packet.len(), 8); // The packet still borrows the transmitter.
     ) -> Result<&'a [u8], TxError> {
         let max = self.payload_capacity();
         if payload_len > max {
+            #[cfg(feature = "defmt")]
+            defmt::debug!(
+                "TX rejected: payload length {} exceeds capacity {}",
+                payload_len,
+                max
+            );
             return Err(TxError::PayloadTooLarge);
         }
         self.buffer[..PREAMBLE.len()].copy_from_slice(&PREAMBLE);
@@ -149,6 +156,8 @@ assert_eq!(packet.len(), 8); // The packet still borrows the transmitter.
         let checksum = crc.crc(&self.buffer[..crc_start]);
         let packet_end = crc_start + PACKET_CRC_LEN;
         self.buffer[crc_start..packet_end].copy_from_slice(&checksum.to_le_bytes());
+        #[cfg(feature = "defmt")]
+        defmt::debug!("TX packet prepared: {} payload bytes", payload_len);
         Ok(&self.buffer[..packet_end])
     }
 }
@@ -297,6 +306,8 @@ assert!(first.is_empty()); // The earlier payload still borrows the parser.
                     State::Complete { payload_len } => {
                         let payload = &self.new_data[PACKET_HEADER_LEN..][..payload_len];
                         self.new_data = &self.new_data[PACKET_LEN_MIN + payload_len..];
+                        #[cfg(feature = "defmt")]
+                        defmt::debug!("RX packet received: {} payload bytes", payload_len);
                         return Some(payload);
                     }
                 }
@@ -324,6 +335,8 @@ assert!(first.is_empty()); // The earlier payload still borrows the parser.
                     transport.start = consumed;
                     transport.count -= consumed;
                     let payload_start = candidate.start + PACKET_HEADER_LEN;
+                    #[cfg(feature = "defmt")]
+                    defmt::debug!("RX buffered packet received: {} payload bytes", payload_len);
                     return Some(&transport.buffer[payload_start..payload_start + payload_len]);
                 }
                 State::Incomplete { needed } => {
@@ -393,9 +406,18 @@ enum State {
 fn scan<CRC: CrcDevice, const BUFFER: usize>(data: &[u8], crc: &mut CRC) -> Option<Candidate> {
     let mut start = 0;
     while let Some(offset) = data[start..].iter().position(|&byte| byte == PREAMBLE[0]) {
+        #[cfg(feature = "defmt")]
+        if offset != 0 {
+            defmt::debug!("RX discarded {} bytes before preamble", offset);
+        }
         start += offset;
         let candidate = &data[start..];
         if candidate.get(1).is_some_and(|&byte| byte != PREAMBLE[1]) {
+            #[cfg(feature = "defmt")]
+            defmt::debug!(
+                "RX rejected: invalid preamble second byte {=u8:#04x}; resuming scan",
+                candidate[1]
+            );
             start += 1;
             continue;
         }
@@ -410,6 +432,12 @@ fn scan<CRC: CrcDevice, const BUFFER: usize>(data: &[u8], crc: &mut CRC) -> Opti
         let payload_len = u16::from_le_bytes([candidate[2], candidate[3]]) as usize;
         // Reject before adding overhead, which could overflow a 16-bit usize.
         if payload_len > BUFFER - PACKET_LEN_MIN {
+            #[cfg(feature = "defmt")]
+            defmt::debug!(
+                "RX rejected: payload length {} exceeds capacity {}; resuming scan",
+                payload_len,
+                BUFFER - PACKET_LEN_MIN
+            );
             start += 1;
             continue;
         }
@@ -423,13 +451,25 @@ fn scan<CRC: CrcDevice, const BUFFER: usize>(data: &[u8], crc: &mut CRC) -> Opti
         let crc_start = PACKET_HEADER_LEN + payload_len;
         let trailer = &candidate[crc_start..total];
         let received = u32::from_le_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
-        if received == crc.crc(&candidate[..crc_start]) {
+        let expected = crc.crc(&candidate[..crc_start]);
+        if received == expected {
             return Some(Candidate {
                 start,
                 state: State::Complete { payload_len },
             });
         }
+        #[cfg(feature = "defmt")]
+        defmt::debug!(
+            "RX rejected: CRC mismatch for {} payload bytes (received {=u32:#010x}, expected {=u32:#010x}); resuming scan",
+            payload_len,
+            received,
+            expected
+        );
         start += 1;
+    }
+    #[cfg(feature = "defmt")]
+    if start < data.len() {
+        defmt::debug!("RX discarded {} bytes without preamble", data.len() - start);
     }
     None
 }

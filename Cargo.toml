@@ -13,14 +13,18 @@ categories = ["embedded", "no-std"]
 
 [features]
 default = []
+defmt = ["dep:defmt"]
 software-crc = ["dep:crc"]
 
 [dependencies]
 crc = { version = "3.4", optional = true }
+defmt = { version = "1", optional = true }
 
 [dev-dependencies]
 crc = "3.4"
 critical-section = { version = "1.2", features = ["std"] }
+# Allow host tests to exercise logging without a firmware logger or linker script.
+defmt = { version = "1", features = ["unstable-test"] }
 static_cell = "2"
 
 [[example]]
